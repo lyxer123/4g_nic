@@ -338,12 +338,11 @@ esp_err_t esp_bridge_eth_spi_init(esp_netif_t* eth_netif_spi)
     }
 
     if (eth_handle_spi) {
-        /* The SPI Ethernet module might not have a burned factory MAC address, we can set it manually.
-        02:00:00 is a Locally Administered OUI range so should not be used except when testing on a LAN under your control.
-        */
-        ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle_spi, ETH_CMD_S_MAC_ADDR, (uint8_t[]) {
-            0x02, 0x00, 0x00, 0x12, 0x34, 0x56
-        }));
+        /* Keep SPI MAC aligned with esp-netif MAC to avoid DHCP/ARP mismatch. */
+        uint8_t eth_mac[6];
+        ESP_ERROR_CHECK(esp_netif_get_mac(eth_netif_spi, eth_mac));
+        ESP_LOGI(TAG, "SPI Ethernet MAC: " MACSTR, MAC2STR(eth_mac));
+        ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle_spi, ETH_CMD_S_MAC_ADDR, eth_mac));
 
         // attach Ethernet driver to TCP/IP stack
 #if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
@@ -372,7 +371,13 @@ static esp_err_t esp_bridge_eth_reset_phy(void)
 
 static esp_err_t eth_netif_dhcp_status_change_cb(esp_ip_addr_t *ip_info)
 {
+#if CONFIG_BRIDGE_USE_SPI_ETHERNET
+    /* W5500 reset on DHCP/DNS update can flap the wired link. */
+    (void)ip_info;
+    return ESP_OK;
+#else
     return esp_bridge_eth_reset_phy();
+#endif
 }
 
 static void eth_driver_free_rx_buffer(void *h, void* buffer)

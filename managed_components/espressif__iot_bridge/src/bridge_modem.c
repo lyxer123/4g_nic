@@ -7,6 +7,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include "driver/gpio.h"
+#include "esp_modem_c_api_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "esp_event.h"
@@ -117,7 +118,7 @@ esp_netif_t *esp_bridge_create_modem_netif(esp_netif_ip_info_t *custom_ip_info, 
     };
     gpio_config(&io_config);
     gpio_set_level(CONFIG_MODEM_RESET_GPIO, 0);
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(1000));
     gpio_set_level(CONFIG_MODEM_RESET_GPIO, 1);
 
     vTaskDelay(pdMS_TO_TICKS(MODULE_BOOT_TIME_MS));
@@ -177,10 +178,14 @@ esp_netif_t *esp_bridge_create_modem_netif(esp_netif_ip_info_t *custom_ip_info, 
     struct esp_modem_usb_term_config usb_config = ESP_MODEM_DEFAULT_USB_CONFIG(CONFIG_BRIDGE_MODEM_USB_VID, CONFIG_BRIDGE_MODEM_USB_PID, CONFIG_BRIDGE_MODEM_USB_INTERFACE_NUMBER); // VID, PID and interface num of 4G modem
     const esp_modem_dte_config_t dte_usb_config = ESP_MODEM_DTE_DEFAULT_USB_CONFIG(usb_config);
     ESP_LOGI(TAG, "Waiting for USB device connection...");
-    esp_modem_dce_t *dce = esp_modem_new_dev_usb(ESP_MODEM_DCE_BG96, &dte_usb_config, &dce_config, esp_netif);
+    //esp_modem_dce_t *dce = esp_modem_new_dev_usb(ESP_MODEM_DCE_BG96, &dte_usb_config, &dce_config, esp_netif);
+    
+    esp_modem_dce_t *dce = esp_modem_new_dev_usb(ESP_MODEM_DCE_GENETIC, &dte_usb_config, &dce_config, esp_netif);
+    
+    
     assert(dce);
     esp_modem_set_error_cb(dce, usb_terminal_error_handler);
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Although the DTE should be ready after USB enumeration, sometimes it fails to respond without this delay
+    vTaskDelay(pdMS_TO_TICKS(2000)); // Although the DTE should be ready after USB enumeration, sometimes it fails to respond without this delay
 
 #else
 #error Invalid serial connection to modem.
@@ -201,9 +206,19 @@ esp_netif_t *esp_bridge_create_modem_netif(esp_netif_ip_info_t *custom_ip_info, 
 #endif
 
     int rssi, ber;
-    esp_err_t err = esp_modem_get_signal_quality(dce, &rssi, &ber);
+    esp_err_t err;
+    int retry = 3;
+    while (retry-- > 0) {
+        err = esp_modem_get_signal_quality(dce, &rssi, &ber);
+        if (err == ESP_OK) {
+            break;
+        }
+        ESP_LOGE(TAG, "esp_modem_get_signal_quality failed with %d %s, retrying... (%d attempts left)", err, esp_err_to_name(err), retry);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_modem_get_signal_quality failed with %d %s", err, esp_err_to_name(err));
+        ESP_LOGE(TAG, "esp_modem_get_signal_quality failed after 3 attempts with %d %s", err, esp_err_to_name(err));
         esp_modem_destroy(dce);
         esp_netif_destroy(esp_netif);
         vEventGroupDelete(event_group);
