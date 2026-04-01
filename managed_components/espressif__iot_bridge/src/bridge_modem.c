@@ -92,6 +92,10 @@ static void on_ip_event(void *arg, esp_event_base_t event_base,
         xEventGroupSetBits(event_group, CONNECT_BIT);
         esp_bridge_update_dns_info(event->esp_netif, NULL);
         ESP_LOGI(TAG, "GOT ip event!!!");
+
+        // Enable NAPT on the WAN (PPP) interface
+        ip_napt_enable(event->ip_info.ip.addr, 1);
+        ESP_LOGI(TAG, "NAPT enabled on WAN interface");
     } else if (event_id == IP_EVENT_PPP_LOST_IP) {
         ESP_LOGI(TAG, "Modem Disconnect from PPP Server");
         IOT_BRIDGE_NAPT_TABLE_CLEAR();

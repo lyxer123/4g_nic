@@ -332,9 +332,11 @@ esp_netif_t* esp_bridge_create_netif(esp_netif_config_t* config, esp_netif_ip_in
             esp_netif_set_mac(netif, allocate_mac);
         }
     }
-    // Start the netif in a manual way, no need for events
-    esp_netif_action_start(netif, NULL, 0, NULL);
-    esp_netif_up(netif);
+    // Start non-Ethernet netifs manually; Ethernet is brought up by esp_eth glue.
+    if (strcmp(esp_netif_get_ifkey(netif), "ETH_WAN") != 0 && strcmp(esp_netif_get_ifkey(netif), "ETH_LAN") != 0) {
+        esp_netif_action_start(netif, NULL, 0, NULL);
+        esp_netif_up(netif);
+    }
 
     if (enable_dhcps) {
         esp_netif_dns_info_t dns;
@@ -356,7 +358,9 @@ esp_netif_t* esp_bridge_create_netif(esp_netif_config_t* config, esp_netif_ip_in
         uint8_t offer_router = 1;
         ESP_ERROR_CHECK(esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET, ESP_NETIF_ROUTER_SOLICITATION_ADDRESS, &offer_router, sizeof(offer_router)));
 
-        ESP_ERROR_CHECK(esp_netif_dhcps_start(netif));
+        if (strcmp(esp_netif_get_ifkey(netif), "ETH_WAN") != 0 && strcmp(esp_netif_get_ifkey(netif), "ETH_LAN") != 0) {
+            ESP_ERROR_CHECK(esp_netif_dhcps_start(netif));
+        }
     }
 
     return netif;
@@ -689,6 +693,33 @@ esp_err_t esp_bridge_netif_set_ip_info(esp_netif_t *netif, esp_netif_ip_info_t *
 void esp_bridge_create_all_netif(void)
 {
     ESP_LOGI(TAG, "esp-iot-bridge version: %d.%d.%d", IOT_BRIDGE_VER_MAJOR, IOT_BRIDGE_VER_MINOR, IOT_BRIDGE_VER_PATCH);
+    ESP_LOGI(TAG, "netif cfg: ETH_DF=%d ETH_EXT=%d ETH_AUTO=%d MODEM_EXT=%d SPI_ETH=%d",
+#if defined(CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET)
+             1,
+#else
+             0,
+#endif
+#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET)
+             1,
+#else
+             0,
+#endif
+#if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
+             1,
+#else
+             0,
+#endif
+#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM)
+             1,
+#else
+             0,
+#endif
+#if defined(CONFIG_BRIDGE_USE_SPI_ETHERNET)
+             1
+#else
+             0
+#endif
+    );
 
 #if defined(CONFIG_BRIDGE_DATA_FORWARDING_NETIF_SOFTAP)
     esp_bridge_create_softap_netif(NULL, NULL, true, true);
@@ -718,10 +749,12 @@ void esp_bridge_create_all_netif(void)
 #endif
 
 #if defined(CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET) || defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
+    ESP_LOGI(TAG, "create ETH_LAN netif");
     esp_bridge_create_eth_netif(NULL, NULL, true, true);
 #endif
 
 #if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET) || defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
+    ESP_LOGI(TAG, "create ETH_WAN netif");
     esp_bridge_create_eth_netif(NULL, NULL, false, false);
 #endif
 
