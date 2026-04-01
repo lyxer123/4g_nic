@@ -1,0 +1,14 @@
+# Name,   Type, SubType, Offset,  Size, Flags
+# ESP32-S3-N16R8: bootloader 扩容版（0x1000~0x10000 约 60KB），分区表 0x10000。
+# esp-bootloader-plus: storage 存压缩/差量 OTA 固件；font/www/lua/key_data 见 doc。
+nvs,        data, nvs,     0x11000, 0x14000,
+otadata,    data, ota,     0x25000, 0x2000,
+phy_init,   data, phy,     0x27000, 0x1000,
+factory,    app,  factory, 0x30000,  0x300000,
+ota_0,      app,  ota_0,   0x330000, 0x300000,
+ota_1,      app,  ota_1,   0x630000, 0x300000,
+storage,    data, 0x22,    0x930000, 0x1C5800,
+font,       data, 0x50,    0xAF6000, 0x180000,
+www,        data, littlefs, 0xC76000, 0x25800,
+lua,        data, littlefs, 0xC9C000, 0x344000,
+key_data,   data, 0x40,    0xFE0000, 0x20000,

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>4G_NIC Wi-Fi STA 设置</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="logo">
+        <div class="logo-mark">Wi-Fi</div>
+        <div class="logo-text">
+          <div class="logo-title">4G_NIC</div>
+          <div class="logo-subtitle">STA 配网</div>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="connection-status" id="connectionStatus">
+          <span class="status-dot"></span>
+          <span class="status-text" id="connectionText">未连接</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <section>
+        <h2>Wi-Fi Station（STA）设置</h2>
+
+        <div class="card">
+          <div class="card-header">
+            <h3>连接上级路由器</h3>
+          </div>
+          <div class="card-body">
+            <div class="form-row">
+              <div class="form-group">
+                <label for="wifiSsidInput">SSID</label>
+                <div class="ssid-input-group">
+                  <input id="wifiSsidInput" type="text" placeholder="选择或输入 Wi-Fi 名称" autocomplete="off" />
+                  <button class="btn btn-secondary" id="wifiScanBtn" type="button">扫描</button>
+                </div>
+                <div class="available-ssids" id="availableSsidsBox" style="display:none;">
+                  <div class="available-ssids-header">
+                    <span>可用 SSID</span>
+                    <button class="btn btn-link" type="button" id="ssidListCloseBtn">关闭</button>
+                  </div>
+                  <ul id="availableSsidsList"></ul>
+                </div>
+                <span class="form-hint">点击“扫描”获取附近热点，点击列表项会自动填入 SSID。</span>
+              </div>
+
+              <div class="form-group">
+                <label for="wifiPasswordInput">密码</label>
+                <input id="wifiPasswordInput" type="password" placeholder="请输入 Wi-Fi 密码（可为空表示开放网络）" autocomplete="new-password" />
+                <span class="form-hint">WPA/WPA2 通常需要 ≥ 8 位；开放网络可留空。</span>
+              </div>
+            </div>
+
+            <div class="form-actions">
+              <button class="btn btn-primary" id="saveBtn" type="button">保存/修改</button>
+              <button class="btn btn-secondary" id="loadBtn" type="button">从设备读取</button>
+              <button class="btn btn-danger" id="clearBtn" type="button">清空</button>
+            </div>
+
+            <div class="result-box" id="resultBox" style="display:none;">
+              <div class="result-title">当前保存的 STA 配置</div>
+              <div class="result-grid">
+                <div class="result-item">
+                  <div class="result-label">SSID</div>
+                  <div class="result-value" id="savedSsid">—</div>
+                </div>
+                <div class="result-item">
+                  <div class="result-label">密码</div>
+                  <div class="result-value" id="savedPwd">—</div>
+                </div>
+              </div>
+              <div class="result-hint">注意：为了安全，实际设备侧接口建议不要返回明文密码；本页仅用于演示/调试。</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>页面目录：<code>webPage/</code>（前端仅实现 STA 扫描与保存）</p>
+    </footer>
+  </div>
+
+  <div class="toast" id="toast" style="display:none;">
+    <div class="toast-content" id="toastContent"></div>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
+

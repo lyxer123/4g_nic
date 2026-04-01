@@ -118,10 +118,21 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.5.2
+    version: 5.5.4
+  joltwallet/littlefs:
+    component_hash: dcea25bcef2de023f089f5f01e8d8c46ad1b8ffef75861ad5ffb4098555839df
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.20.4
 direct_dependencies:
 - espressif/iot_bridge
 - idf
-manifest_hash: ed23a28faab51291198edcbd59331a5c1211e97f4521dc05289820d9f6cec1f6
+- joltwallet/littlefs
+manifest_hash: c90387fbe201908e731351571d6043e64c9c7f242e01fa65ab132ae639a6c1e9
 target: esp32s3
 version: 2.0.0
