@@ -36,8 +36,6 @@ esp_err_t esp_netif_up(esp_netif_t *esp_netif);
 esp_err_t esp_netif_down(esp_netif_t *esp_netif);
 
 static eth_link_t state = ETH_LINK_DOWN;
-static bool eth_lan_started = false;
-static bool eth_wan_started = false;
 esp_err_t esp_bridge_set_eth_lan_netif(esp_netif_t* netif)
 {
     eth_lan_netif = netif;
@@ -52,21 +50,12 @@ esp_err_t esp_bridge_set_eth_wan_netif(esp_netif_t* netif)
 
 static esp_err_t eth_input_to_netif(esp_eth_handle_t eth_handle, uint8_t *buffer, uint32_t length, void *priv)
 {
-    /*
-     * One SPI/MAC is shared by ETH_LAN + ETH_WAN (AUTO_WAN_OR_LAN). After link up, both netifs
-     * are marked up before role settles; feeding the same frame to WAN while LAN is still up
-     * hits esp_netif_receive on a WAN stack that may not have a valid lwIP input yet (e.g.
-     * DHCP client start failed), causing a NULL PC. Deliver to LAN only while LAN is up; WAN
-     * receives only after eth_action_got_ip has taken LAN down.
-     */
     if (eth_lan_netif && esp_netif_is_netif_up(eth_lan_netif)) {
         uint8_t *buffer2 = malloc(length);
         if (buffer2) {
             memcpy(buffer2, buffer, length);
             esp_netif_receive(eth_lan_netif, buffer2, length, NULL);
         }
-        free(buffer);
-        return ESP_OK;
     }
 
     if (eth_wan_netif && esp_netif_is_netif_up(eth_wan_netif)) {
@@ -122,14 +111,12 @@ static void eth_action_start(void *handler_args, esp_event_base_t base, int32_t 
     esp_eth_netif_glue_t *netif_glue = handler_args;
     ESP_LOGD(TAG, "eth_action_start: %p, %p, %" PRIi32 ", %p, %p", netif_glue, base, event_id, event_data, *(esp_eth_handle_t *)event_data);
     if (netif_glue->eth_driver == eth_handle) {
-        if (eth_lan_netif && !eth_lan_started) {
+        if (eth_lan_netif && !esp_netif_is_netif_up(eth_lan_netif)) {
             esp_netif_action_start(eth_lan_netif, base, event_id, event_data);
-            eth_lan_started = true;
         }
 
-        if (eth_wan_netif && !eth_wan_started) {
+        if (eth_wan_netif && !esp_netif_is_netif_up(eth_wan_netif)) {
             esp_netif_action_start(eth_wan_netif, base, event_id, event_data);
-            eth_wan_started = true;
         }
     }
 }
@@ -143,11 +130,9 @@ static void eth_action_stop(void *handler_args, esp_event_base_t base, int32_t e
         if (eth_lan_netif && esp_netif_is_netif_up(eth_lan_netif)) {
             esp_netif_action_stop(eth_lan_netif, base, event_id, event_data);
         }
-        eth_lan_started = false;
         if (eth_wan_netif && esp_netif_is_netif_up(eth_wan_netif)) {
             esp_netif_action_stop(eth_wan_netif, base, event_id, event_data);
         }
-        eth_wan_started = false;
     }
 }
 

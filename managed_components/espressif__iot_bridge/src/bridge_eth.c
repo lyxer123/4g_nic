@@ -10,7 +10,6 @@
 #include "esp_log.h"
 #include "esp_eth.h"
 #include "esp_event.h"
-#include "esp_netif.h"
 
 #include "netif/ethernet.h"
 
@@ -34,48 +33,6 @@
 static const char *TAG = "bridge_eth";
 
 static esp_eth_phy_t *phy = NULL;
-
-/* Run on tcpip thread so netif is up before DHCPS; avoids queue order bug vs esp_eth glue's esp_netif_up. */
-static esp_err_t eth_lan_tcpip_on_link_up(void *ctx)
-{
-    esp_netif_t *netif_lan = (esp_netif_t *)ctx;
-    if (!netif_lan) {
-        return ESP_OK;
-    }
-    esp_netif_up(netif_lan);
-
-    esp_netif_dhcp_status_t dhcp_status = ESP_NETIF_DHCP_INIT;
-    if (esp_netif_dhcps_get_status(netif_lan, &dhcp_status) == ESP_OK && dhcp_status != ESP_NETIF_DHCP_STARTED) {
-        esp_err_t err = esp_netif_dhcps_start(netif_lan);
-        if (err == ESP_OK) {
-            ESP_LOGI(TAG, "ETH_LAN DHCP server started");
-        } else {
-            ESP_LOGW(TAG, "ETH_LAN DHCP server start failed: %s", esp_err_to_name(err));
-        }
-    }
-
-    esp_netif_ip_info_t ip_info = {0};
-    if (esp_netif_get_ip_info(netif_lan, &ip_info) == ESP_OK) {
-        ESP_LOGI(TAG, "ETH_LAN status: up=%d ip=" IPSTR " gw=" IPSTR " nm=" IPSTR,
-                 esp_netif_is_netif_up(netif_lan),
-                 IP2STR(&ip_info.ip), IP2STR(&ip_info.gw), IP2STR(&ip_info.netmask));
-    }
-    return ESP_OK;
-}
-
-static esp_err_t eth_lan_tcpip_on_link_down(void *ctx)
-{
-    esp_netif_t *netif_lan = (esp_netif_t *)ctx;
-    if (!netif_lan) {
-        return ESP_OK;
-    }
-    esp_netif_dhcp_status_t st = ESP_NETIF_DHCP_INIT;
-    if (esp_netif_dhcps_get_status(netif_lan, &st) == ESP_OK && st == ESP_NETIF_DHCP_STARTED) {
-        esp_netif_dhcps_stop(netif_lan);
-    }
-    ESP_LOGI(TAG, "ETH_LAN status on down: up=%d", esp_netif_is_netif_up(netif_lan));
-    return ESP_OK;
-}
 
 #if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
 esp_eth_netif_glue_handle_t esp_bridge_eth_new_netif_glue(esp_eth_handle_t eth_hdl);
@@ -108,29 +65,11 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
         esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, mac_addr);
         ESP_LOGI(TAG, "Ethernet Link Up");
         ESP_LOGI(TAG, "Ethernet HW Addr "MACSTR"", MAC2STR(mac_addr));
-        esp_netif_t *netif_lan = esp_netif_get_handle_from_ifkey("ETH_LAN");
-        if (netif_lan) {
-            esp_err_t ex = esp_netif_tcpip_exec(eth_lan_tcpip_on_link_up, netif_lan);
-            if (ex != ESP_OK) {
-                ESP_LOGW(TAG, "ETH_LAN tcpip_exec(link up) failed: %s", esp_err_to_name(ex));
-            }
-        }
             break;
 
         case ETHERNET_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "Ethernet Link Down");
-            esp_netif_t *netif_lan_down = esp_netif_get_handle_from_ifkey("ETH_LAN");
-            if (netif_lan_down) {
-                esp_err_t ex = esp_netif_tcpip_exec(eth_lan_tcpip_on_link_down, netif_lan_down);
-                if (ex != ESP_OK) {
-                    ESP_LOGW(TAG, "ETH_LAN tcpip_exec(link down) failed: %s", esp_err_to_name(ex));
-                }
-            }
-#if CONFIG_BRIDGE_USE_SPI_ETHERNET
-            /* PPP is WAN; do not flush NAPT when only the SPI LAN cable drops — reduces churn and tcpip stalls. */
-#else
             IOT_BRIDGE_NAPT_TABLE_CLEAR();
-#endif
             break;
 
         case ETHERNET_EVENT_START:
@@ -399,29 +338,12 @@ esp_err_t esp_bridge_eth_spi_init(esp_netif_t* eth_netif_spi)
     }
 
     if (eth_handle_spi) {
-        /* Keep SPI MAC aligned with esp-netif MAC to avoid DHCP/ARP mismatch. */
-        uint8_t eth_mac[6];
-
-#if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
-        /*
-         * This function is invoked twice (ETH_LAN then ETH_WAN), sharing one eth_handle.
-         * ETH_WAN's esp_netif MAC is still all-zero on the second call; pushing that into
-         * the W5500 corrupts the PHY MAC and breaks RX (esp_netif_receive / NULL input).
-         */
-        if (!eth_is_start) {
-            ESP_ERROR_CHECK(esp_netif_get_mac(eth_netif_spi, eth_mac));
-            ESP_LOGI(TAG, "SPI Ethernet MAC: " MACSTR, MAC2STR(eth_mac));
-            ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle_spi, ETH_CMD_S_MAC_ADDR, eth_mac));
-        } else {
-            ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle_spi, ETH_CMD_G_MAC_ADDR, eth_mac));
-            ESP_LOGI(TAG, "SPI Ethernet MAC (2nd netif, from chip): " MACSTR, MAC2STR(eth_mac));
-            ESP_ERROR_CHECK(esp_netif_set_mac(eth_netif_spi, eth_mac));
-        }
-#else
-        ESP_ERROR_CHECK(esp_netif_get_mac(eth_netif_spi, eth_mac));
-        ESP_LOGI(TAG, "SPI Ethernet MAC: " MACSTR, MAC2STR(eth_mac));
-        ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle_spi, ETH_CMD_S_MAC_ADDR, eth_mac));
-#endif
+        /* The SPI Ethernet module might not have a burned factory MAC address, we can set it manually.
+        02:00:00 is a Locally Administered OUI range so should not be used except when testing on a LAN under your control.
+        */
+        ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle_spi, ETH_CMD_S_MAC_ADDR, (uint8_t[]) {
+            0x02, 0x00, 0x00, 0x12, 0x34, 0x56
+        }));
 
         // attach Ethernet driver to TCP/IP stack
 #if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
@@ -441,24 +363,34 @@ esp_err_t esp_bridge_eth_spi_init(esp_netif_t* eth_netif_spi)
 }
 #endif // CONFIG_BRIDGE_USE_SPI_ETHERNET
 
-#if !CONFIG_BRIDGE_USE_SPI_ETHERNET
 static esp_err_t esp_bridge_eth_reset_phy(void)
 {
     phy->reset_hw(phy);
     ESP_LOGW(TAG, "Hardware Reset Ethernet PHY");
     return ESP_OK;
 }
-#endif
 
 static esp_err_t eth_netif_dhcp_status_change_cb(esp_ip_addr_t *ip_info)
 {
-#if CONFIG_BRIDGE_USE_SPI_ETHERNET
-    /* W5500 reset on DHCP/DNS update can flap the wired link. */
-    (void)ip_info;
-    return ESP_OK;
-#else
     return esp_bridge_eth_reset_phy();
-#endif
+}
+
+static void eth_driver_free_rx_buffer(void *h, void* buffer)
+{
+    if (buffer) {
+        free(buffer);
+    }
+}
+
+static esp_err_t eth_io_transmit(void *h, void *buffer, size_t len)
+{
+    // TODO
+    return ESP_OK;
+}
+
+static esp_err_t eth_io_transmit_wrap(void *h, void *buffer, size_t len, void *netstack_buf)
+{
+    return eth_io_transmit(h, buffer, len);
 }
 
 esp_netif_t* esp_bridge_create_eth_netif(esp_netif_ip_info_t* ip_info, uint8_t mac[6], bool data_forwarding, bool enable_dhcps)
@@ -478,15 +410,22 @@ esp_netif_t* esp_bridge_create_eth_netif(esp_netif_ip_info_t* ip_info, uint8_t m
     if (data_forwarding) {
         esp_netif_common_config.flags |= ESP_NETIF_DHCP_SERVER;
         esp_netif_common_config.if_key = "ETH_LAN";
-        esp_netif_common_config.route_prio = 60;
+        esp_netif_common_config.route_prio = 10;
     } else {
         esp_netif_common_config.flags |= ESP_NETIF_DHCP_CLIENT;
     }
 
+    const esp_netif_driver_ifconfig_t eth_driver_ifconfig = {
+        .driver_free_rx_buffer = eth_driver_free_rx_buffer,
+        .transmit = eth_io_transmit,
+        .transmit_wrap = eth_io_transmit_wrap,
+        .handle = "ETH" // this IO object is a singleton, its handle uses as a name
+    };
+
     esp_bridge_eth_event_handler_register();
 
-    esp_netif_config_t eth_config = ESP_NETIF_DEFAULT_ETH();
-    eth_config.driver = NULL;
+    esp_netif_config_t eth_config = ESP_NETIF_DEFAULT_ETH(); // this configuration is for eth client
+    eth_config.driver = &eth_driver_ifconfig;
     eth_config.base = &esp_netif_common_config;
 
     esp_netif_t* netif = esp_bridge_create_netif(&eth_config, ip_info, mac, enable_dhcps);
@@ -498,21 +437,27 @@ esp_netif_t* esp_bridge_create_eth_netif(esp_netif_ip_info_t* ip_info, uint8_t m
             esp_bridge_set_eth_wan_netif(netif);
         }
 #endif
+        esp_netif_action_stop(netif, NULL, 0, NULL);
 #if CONFIG_BRIDGE_USE_INTERNAL_ETHERNET
         esp_bridge_eth_init(netif);
 #elif CONFIG_BRIDGE_USE_SPI_ETHERNET
         esp_bridge_eth_spi_init(netif);
 #endif
-        // Do not force netif up here; esp_eth glue starts/adds netif on driver events.
+        esp_netif_up(netif);
+
         ESP_LOGI(TAG, "[%-12s]", esp_netif_get_ifkey(netif));
 
         if (data_forwarding) {
             esp_bridge_netif_list_add(netif, eth_netif_dhcp_status_change_cb, eth_netif_dhcp_status_change_cb);
             esp_netif_get_ip_info(netif, &netif_ip_info);
             ESP_LOGI(TAG, "ETH IP Address:" IPSTR, IP2STR(&netif_ip_info.ip));
-            // ip_napt_enable(netif_ip_info.ip.addr, 1); // Remove NAPT from LAN interface
+            ip_napt_enable(netif_ip_info.ip.addr, 1);
         } else {
             esp_bridge_netif_list_add(netif, NULL, NULL);
+        }
+
+        if (enable_dhcps) {
+            esp_netif_dhcps_start(netif);
         }
     }
 

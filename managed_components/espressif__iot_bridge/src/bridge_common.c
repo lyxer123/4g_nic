@@ -151,14 +151,30 @@ bool esp_bridge_network_segment_check_register(bool (*custom_check_cb)(uint32_t 
 
 esp_err_t esp_bridge_netif_request_ip(esp_netif_ip_info_t *ip_info)
 {
-    /* Fixed LAN segment for stable wired deployment. */
-    ip_info->ip.addr = ESP_IP4TOADDR(192, 168, 4, 1);
-    ip_info->gw.addr = ESP_IP4TOADDR(192, 168, 4, 1);
-    ip_info->netmask.addr = ESP_IP4TOADDR(255, 255, 255, 0);
-    ESP_LOGI(TAG, "IP Address:" IPSTR, IP2STR(&ip_info->ip));
-    ESP_LOGI(TAG, "GW Address:" IPSTR, IP2STR(&ip_info->gw));
-    ESP_LOGI(TAG, "NM Address:" IPSTR, IP2STR(&ip_info->netmask));
-    return ESP_OK;
+    bool ip_segment_is_used = true;
+
+    for (uint8_t bridge_ip = 4; bridge_ip < 255; bridge_ip++) {
+        esp_bridge_network_segment_custom_check_t *list = custom_check_list;
+        ip_segment_is_used = esp_bridge_netif_network_segment_is_used(ESP_IP4TOADDR(192, 168, bridge_ip, 1));
+
+        while (!ip_segment_is_used && list) {
+            ip_segment_is_used = list->custom_check_cb(ESP_IP4TOADDR(192, 168, bridge_ip, 1));
+            list = list->next;
+        }
+
+        if (!ip_segment_is_used) {
+            ip_info->ip.addr = ESP_IP4TOADDR(192, 168, bridge_ip, 1);
+            ip_info->gw.addr = ESP_IP4TOADDR(192, 168, bridge_ip, 1);
+            ip_info->netmask.addr = ESP_IP4TOADDR(255, 255, 255, 0);
+            ESP_LOGI(TAG, "IP Address:" IPSTR, IP2STR(&ip_info->ip));
+            ESP_LOGI(TAG, "GW Address:" IPSTR, IP2STR(&ip_info->gw));
+            ESP_LOGI(TAG, "NM Address:" IPSTR, IP2STR(&ip_info->netmask));
+
+            return ESP_OK;
+        }
+    }
+
+    return ESP_FAIL;
 }
 
 static bool esp_bridge_netif_mac_is_used(uint8_t mac[6])
@@ -278,11 +294,7 @@ esp_err_t esp_bridge_netif_network_segment_conflict_update(esp_netif_t *esp_neti
                     break;
                 }
 
-                esp_netif_dhcp_status_t dhcps_state = ESP_NETIF_DHCP_INIT;
-                if (esp_netif_dhcps_get_status(p->netif, &dhcps_state) == ESP_OK &&
-                    dhcps_state != ESP_NETIF_DHCP_STOPPED) {
-                    ESP_ERROR_CHECK(esp_netif_dhcps_stop(p->netif));
-                }
+                ESP_ERROR_CHECK(esp_netif_dhcps_stop(p->netif));
                 esp_netif_set_ip_info(p->netif, &allocate_ip_info);
                 ESP_LOGI(TAG, "ip reallocate new:" IPSTR, IP2STR(&allocate_ip_info.ip));
                 ESP_ERROR_CHECK(esp_netif_dhcps_start(p->netif));
@@ -336,11 +348,9 @@ esp_netif_t* esp_bridge_create_netif(esp_netif_config_t* config, esp_netif_ip_in
             esp_netif_set_mac(netif, allocate_mac);
         }
     }
-    // Start non-Ethernet netifs manually; Ethernet is brought up by esp_eth glue.
-    if (strcmp(esp_netif_get_ifkey(netif), "ETH_WAN") != 0 && strcmp(esp_netif_get_ifkey(netif), "ETH_LAN") != 0) {
-        esp_netif_action_start(netif, NULL, 0, NULL);
-        esp_netif_up(netif);
-    }
+    // Start the netif in a manual way, no need for events
+    esp_netif_action_start(netif, NULL, 0, NULL);
+    esp_netif_up(netif);
 
     if (enable_dhcps) {
         esp_netif_dns_info_t dns;
@@ -349,22 +359,7 @@ esp_netif_t* esp_bridge_create_netif(esp_netif_config_t* config, esp_netif_ip_in
         dhcps_offer_t dhcps_dns_value = OFFER_DNS;
         ESP_ERROR_CHECK(esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &dhcps_dns_value, sizeof(dhcps_dns_value)));
         ESP_ERROR_CHECK(esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns));
-
-        /* Fixed DHCP pool: .2-.9 (8 leases, matches current DHCPS max station setting). */
-        dhcps_lease_t lease = {
-            .enable = true,
-            .start_ip = IPADDR4_INIT_BYTES(192, 168, 4, 2),
-            .end_ip = IPADDR4_INIT_BYTES(192, 168, 4, 9),
-        };
-        ESP_ERROR_CHECK(esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET, ESP_NETIF_REQUESTED_IP_ADDRESS, &lease, sizeof(lease)));
-
-        /* Offer default gateway/router option to DHCP clients. */
-        uint8_t offer_router = 1;
-        ESP_ERROR_CHECK(esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET, ESP_NETIF_ROUTER_SOLICITATION_ADDRESS, &offer_router, sizeof(offer_router)));
-
-        if (strcmp(esp_netif_get_ifkey(netif), "ETH_WAN") != 0 && strcmp(esp_netif_get_ifkey(netif), "ETH_LAN") != 0) {
-            ESP_ERROR_CHECK(esp_netif_dhcps_start(netif));
-        }
+        ESP_ERROR_CHECK(esp_netif_dhcps_start(netif));
     }
 
     return netif;
@@ -697,33 +692,6 @@ esp_err_t esp_bridge_netif_set_ip_info(esp_netif_t *netif, esp_netif_ip_info_t *
 void esp_bridge_create_all_netif(void)
 {
     ESP_LOGI(TAG, "esp-iot-bridge version: %d.%d.%d", IOT_BRIDGE_VER_MAJOR, IOT_BRIDGE_VER_MINOR, IOT_BRIDGE_VER_PATCH);
-    ESP_LOGI(TAG, "netif cfg: ETH_DF=%d ETH_EXT=%d ETH_AUTO=%d MODEM_EXT=%d SPI_ETH=%d",
-#if defined(CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET)
-             1,
-#else
-             0,
-#endif
-#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET)
-             1,
-#else
-             0,
-#endif
-#if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
-             1,
-#else
-             0,
-#endif
-#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM)
-             1,
-#else
-             0,
-#endif
-#if defined(CONFIG_BRIDGE_USE_SPI_ETHERNET)
-             1
-#else
-             0
-#endif
-    );
 
 #if defined(CONFIG_BRIDGE_DATA_FORWARDING_NETIF_SOFTAP)
     esp_bridge_create_softap_netif(NULL, NULL, true, true);
@@ -753,12 +721,10 @@ void esp_bridge_create_all_netif(void)
 #endif
 
 #if defined(CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET) || defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
-    ESP_LOGI(TAG, "create ETH_LAN netif");
     esp_bridge_create_eth_netif(NULL, NULL, true, true);
 #endif
 
 #if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET) || defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
-    ESP_LOGI(TAG, "create ETH_WAN netif");
     esp_bridge_create_eth_netif(NULL, NULL, false, false);
 #endif
 

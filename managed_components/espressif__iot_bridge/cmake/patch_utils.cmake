@@ -70,11 +70,10 @@ function(apply_patches_from_list)
                 if("$ENV{IDF_PATH}" STREQUAL "")
                     message(FATAL_ERROR "IDF_PATH environment variable is not set")
                 endif()
-                # Do not put IDF_PATH into REGEX REPLACE replacement: on Windows backslashes
-                # (e.g. C:\esp\...) are parsed as escapes (\e is invalid).
+                # Windows IDF_PATH contains backslashes; REGEX REPLACE treats \e etc. in the replacement as escapes.
                 file(TO_CMAKE_PATH "$ENV{IDF_PATH}" _iot_bridge_idf_path)
-                string(REGEX REPLACE "^esp-idf" "" _iot_bridge_idf_suffix "${current_path}")
-                set(current_path "${_iot_bridge_idf_path}${_iot_bridge_idf_suffix}")
+                string(REGEX REPLACE "^esp-idf" "" _iot_bridge_rel "${current_path}")
+                set(current_path "${_iot_bridge_idf_path}${_iot_bridge_rel}")
             endif()
 
         # Check if this is a version condition (support multiple operators: <, <=, >, >=, =, ==)
