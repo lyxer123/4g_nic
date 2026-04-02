@@ -10,7 +10,9 @@
 #include "esp_http_server.h"
 #include "esp_littlefs.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_wifi.h"
+#include "esp_wifi_default.h"
 #include "nvs.h"
 #include "web_service.h"
 
@@ -77,6 +79,20 @@ err:
 
 static esp_err_t apply_sta_config(const char *ssid, const char *password)
 {
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    ESP_RETURN_ON_ERROR(esp_wifi_get_mode(&mode), TAG, "get wifi mode failed");
+
+    /* SoftAP-only bridge leaves WiFi in AP mode; STA config requires APSTA (or STA). */
+    if (mode == WIFI_MODE_AP) {
+        ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_APSTA), TAG, "set APSTA failed");
+    } else if (mode != WIFI_MODE_STA && mode != WIFI_MODE_APSTA) {
+        ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_APSTA), TAG, "set APSTA failed");
+    }
+
+    if (esp_netif_get_handle_from_ifkey("WIFI_STA_DEF") == NULL) {
+        esp_netif_create_default_wifi_sta();
+    }
+
     wifi_config_t cfg = {0};
     strlcpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid));
     strlcpy((char *)cfg.sta.password, password, sizeof(cfg.sta.password));

@@ -1,3 +1,6 @@
 dependencies:
+  # Lock must use name "espressif/cmake_utilities" or IDF re-solves and needs the registry.
+  espressif/cmake_utilities:
+    path: "../../esp-iot-solution/tools/cmake_utilities"
   espressif/iot_bridge: "*"
   joltwallet/littlefs: "*"
