@@ -52,12 +52,21 @@ esp_err_t esp_bridge_set_eth_wan_netif(esp_netif_t* netif)
 
 static esp_err_t eth_input_to_netif(esp_eth_handle_t eth_handle, uint8_t *buffer, uint32_t length, void *priv)
 {
+    /*
+     * One SPI/MAC is shared by ETH_LAN + ETH_WAN (AUTO_WAN_OR_LAN). After link up, both netifs
+     * are marked up before role settles; feeding the same frame to WAN while LAN is still up
+     * hits esp_netif_receive on a WAN stack that may not have a valid lwIP input yet (e.g.
+     * DHCP client start failed), causing a NULL PC. Deliver to LAN only while LAN is up; WAN
+     * receives only after eth_action_got_ip has taken LAN down.
+     */
     if (eth_lan_netif && esp_netif_is_netif_up(eth_lan_netif)) {
         uint8_t *buffer2 = malloc(length);
         if (buffer2) {
             memcpy(buffer2, buffer, length);
             esp_netif_receive(eth_lan_netif, buffer2, length, NULL);
         }
+        free(buffer);
+        return ESP_OK;
     }
 
     if (eth_wan_netif && esp_netif_is_netif_up(eth_wan_netif)) {

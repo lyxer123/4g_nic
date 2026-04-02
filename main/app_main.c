@@ -84,26 +84,28 @@ static void bridge_softap_dhcps_full_config(void)
     bridge_softap_napt_refresh();
 }
 
-static void on_sta_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
+/** Wired(ETH_WAN) or WiFi(STA) uplink got IPv4 — keep SoftAP DHCP/NAPT/default route in sync. */
+static void on_uplink_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
     (void)base;
-    (void)id;
 
     ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
     if (ev && ev->esp_netif) {
         esp_netif_set_default_netif(ev->esp_netif);
-        ESP_LOGI(TAG, "Default route: uplink STA netif");
+        ESP_LOGI(TAG, "Default route: uplink %s", esp_netif_get_ifkey(ev->esp_netif));
     }
 
-    /* Run after iot_bridge STA handler: update_dns -> deauth SoftAP clients. */
+    /* After iot-bridge handler (DNS update / possible deauth): reapply SoftAP DHCPS + NAPT. */
     bridge_softap_dhcps_full_config();
 
-    esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "esp_wifi_set_ps(NONE): %s", esp_err_to_name(err));
-    } else {
-        ESP_LOGI(TAG, "STA Wi-Fi power save off (better NAT/throughput)");
+    if (id == IP_EVENT_STA_GOT_IP) {
+        esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "esp_wifi_set_ps(NONE): %s", esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "STA Wi-Fi power save off (better NAT/throughput)");
+        }
     }
 }
 
@@ -130,7 +132,8 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     esp_bridge_create_all_netif();
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_sta_got_ip, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_uplink_got_ip, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &on_uplink_got_ip, NULL));
     bridge_softap_dhcps_full_config();
     ESP_ERROR_CHECK(web_service_start());
 }

@@ -401,9 +401,27 @@ esp_err_t esp_bridge_eth_spi_init(esp_netif_t* eth_netif_spi)
     if (eth_handle_spi) {
         /* Keep SPI MAC aligned with esp-netif MAC to avoid DHCP/ARP mismatch. */
         uint8_t eth_mac[6];
+
+#if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
+        /*
+         * This function is invoked twice (ETH_LAN then ETH_WAN), sharing one eth_handle.
+         * ETH_WAN's esp_netif MAC is still all-zero on the second call; pushing that into
+         * the W5500 corrupts the PHY MAC and breaks RX (esp_netif_receive / NULL input).
+         */
+        if (!eth_is_start) {
+            ESP_ERROR_CHECK(esp_netif_get_mac(eth_netif_spi, eth_mac));
+            ESP_LOGI(TAG, "SPI Ethernet MAC: " MACSTR, MAC2STR(eth_mac));
+            ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle_spi, ETH_CMD_S_MAC_ADDR, eth_mac));
+        } else {
+            ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle_spi, ETH_CMD_G_MAC_ADDR, eth_mac));
+            ESP_LOGI(TAG, "SPI Ethernet MAC (2nd netif, from chip): " MACSTR, MAC2STR(eth_mac));
+            ESP_ERROR_CHECK(esp_netif_set_mac(eth_netif_spi, eth_mac));
+        }
+#else
         ESP_ERROR_CHECK(esp_netif_get_mac(eth_netif_spi, eth_mac));
         ESP_LOGI(TAG, "SPI Ethernet MAC: " MACSTR, MAC2STR(eth_mac));
         ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle_spi, ETH_CMD_S_MAC_ADDR, eth_mac));
+#endif
 
         // attach Ethernet driver to TCP/IP stack
 #if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)

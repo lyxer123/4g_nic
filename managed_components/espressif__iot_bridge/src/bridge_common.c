@@ -278,7 +278,11 @@ esp_err_t esp_bridge_netif_network_segment_conflict_update(esp_netif_t *esp_neti
                     break;
                 }
 
-                ESP_ERROR_CHECK(esp_netif_dhcps_stop(p->netif));
+                esp_netif_dhcp_status_t dhcps_state = ESP_NETIF_DHCP_INIT;
+                if (esp_netif_dhcps_get_status(p->netif, &dhcps_state) == ESP_OK &&
+                    dhcps_state != ESP_NETIF_DHCP_STOPPED) {
+                    ESP_ERROR_CHECK(esp_netif_dhcps_stop(p->netif));
+                }
                 esp_netif_set_ip_info(p->netif, &allocate_ip_info);
                 ESP_LOGI(TAG, "ip reallocate new:" IPSTR, IP2STR(&allocate_ip_info.ip));
                 ESP_ERROR_CHECK(esp_netif_dhcps_start(p->netif));

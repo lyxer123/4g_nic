@@ -35,7 +35,7 @@ REM   www: offset 0xC76000, size 0x25800 (150KB)
 set "OFFSET=0xC76000"
 set "WWW_SIZE=153600"
 REM Port: use ESPPORT env if set, else default COM5
-if not defined ESPPORT set "ESPPORT=COM6"
+if not defined ESPPORT set "ESPPORT=COM8"
 echo.
 echo ========================================
 echo Using www partition offset: !OFFSET! size 0x25800 (150KB) - see partitions_large.csv
