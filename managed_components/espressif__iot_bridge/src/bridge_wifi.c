@@ -262,6 +262,11 @@ static void wifi_event_ap_stadisconnected_handler(void* arg, esp_event_base_t ev
 
 static esp_err_t softap_netif_dhcp_status_change_cb(esp_ip_addr_t* ip_info)
 {
+    /* dns_change_cb is invoked with NULL (DNS-only refresh). Do not deauth. */
+    if (ip_info == NULL) {
+        return ESP_OK;
+    }
+
     esp_err_t ret = ESP_FAIL;
     ESP_LOGI(TAG, "SoftAP IP network segment has changed, deauth all station");
     if (esp_wifi_deauth_sta(0) == ESP_OK) {

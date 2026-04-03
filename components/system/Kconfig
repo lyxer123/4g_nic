@@ -1,0 +1,25 @@
+menu "System options"
+
+    config SYSTEM_ETH_WAN_USE_STATIC_IP
+        bool "ETH_WAN use static IPv4 (skip DHCP)"
+        default n
+        help
+            When set, applies the addresses below after Ethernet link-up instead of DHCP.
+            Useful when the router has no DHCP or for debugging L3.
+
+    config SYSTEM_ETH_WAN_STATIC_IP_STR
+        string "ETH_WAN static IP address"
+        default "192.168.0.105"
+        depends on SYSTEM_ETH_WAN_USE_STATIC_IP
+
+    config SYSTEM_ETH_WAN_STATIC_GW_STR
+        string "ETH_WAN default gateway"
+        default "192.168.0.1"
+        depends on SYSTEM_ETH_WAN_USE_STATIC_IP
+
+    config SYSTEM_ETH_WAN_STATIC_NM_STR
+        string "ETH_WAN netmask"
+        default "255.255.255.0"
+        depends on SYSTEM_ETH_WAN_USE_STATIC_IP
+
+endmenu

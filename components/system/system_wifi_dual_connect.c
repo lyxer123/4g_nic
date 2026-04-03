@@ -11,14 +11,26 @@
 
 #include "dhcpserver/dhcpserver.h"
 #include "lwip/ip4_addr.h"
+#include "lwip/netif.h"
 #include "lwip/lwip_napt.h"
 
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_netif_net_stack.h"
 
 #include "system_wifi_dual_connect.h"
 
 static const char *TAG = "wifi_dual";
+
+typedef enum {
+    UPLINK_NONE = 0,
+    UPLINK_WIFI_STA,
+    UPLINK_ETH_WAN,
+} uplink_t;
+
+static bool s_wifi_up = false;
+static bool s_eth_up = false;
+static uplink_t s_default = UPLINK_NONE;
 
 static void softap_napt_refresh(void)
 {
@@ -33,8 +45,20 @@ static void softap_napt_refresh(void)
         return;
     }
 
-    ip_napt_enable(ipi.ip.addr, 1);
-    ESP_LOGI(TAG, "NAPT enabled on SoftAP " IPSTR, IP2STR(&ipi.ip));
+    /* ip_napt_enable(addr) matches netif by address; endian/timing can miss and then lwIP returns
+     * without enabling NAPT. Bind directly to the SoftAP lwIP netif (IDF lwIP API). */
+    struct netif *lw = (struct netif *)esp_netif_get_netif_impl(ap);
+    if (!lw || !netif_is_up(lw)) {
+        ESP_LOGW(TAG, "SoftAP lwIP netif missing or down; NAPT skipped");
+        return;
+    }
+    if (!ip_napt_enable_netif(lw, 1)) {
+        ESP_LOGE(TAG, "ip_napt_enable_netif(SoftAP) failed");
+        /* last resort */
+        ip_napt_enable(ipi.ip.addr, 1);
+    }
+    ESP_LOGI(TAG, "NAPT enabled on SoftAP " IPSTR " (netif %c%c%d)", IP2STR(&ipi.ip), lw->name[0],
+             lw->name[1], (int)lw->num);
 #endif
 }
 
@@ -88,33 +112,81 @@ static void softap_dhcps_full_config(void)
     softap_napt_refresh();
 }
 
+static esp_netif_t *get_uplink_netif(uplink_t u)
+{
+    if (u == UPLINK_WIFI_STA) return esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (u == UPLINK_ETH_WAN) return esp_netif_get_handle_from_ifkey("ETH_WAN");
+    return NULL;
+}
+
+static uplink_t choose_default_uplink(void)
+{
+    // Step (1)/(2): if only one uplink is up, choose it.
+    // If both are up (step (3) later), prefer ETH_WAN by default.
+    if (s_eth_up) return UPLINK_ETH_WAN;
+    if (s_wifi_up) return UPLINK_WIFI_STA;
+    return UPLINK_NONE;
+}
+
+static void apply_default_route(uplink_t u)
+{
+    if (u == s_default) return;
+
+    esp_netif_t *netif = get_uplink_netif(u);
+    if (!netif) {
+        ESP_LOGW(TAG, "default uplink netif missing (%d)", (int)u);
+        return;
+    }
+
+    esp_netif_set_default_netif(netif);
+    s_default = u;
+    ESP_LOGI(TAG, "Default route: uplink %s", esp_netif_get_ifkey(netif));
+}
+
 static void on_uplink_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
     (void)base;
 
     ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
-    if (ev && ev->esp_netif) {
-        esp_netif_set_default_netif(ev->esp_netif);
-        ESP_LOGI(TAG, "Default route: uplink %s", esp_netif_get_ifkey(ev->esp_netif));
-    }
+    if (id == IP_EVENT_STA_GOT_IP) s_wifi_up = true;
+    if (id == IP_EVENT_ETH_GOT_IP) s_eth_up = true;
+
+    // Update default route according to current policy.
+    apply_default_route(choose_default_uplink());
 
     // After iot-bridge handler (DNS update / possible deauth): reapply SoftAP DHCP/NAPT.
     softap_dhcps_full_config();
 
-    // Better NAT/throughput.
-    if (id == IP_EVENT_STA_GOT_IP) {
-        esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "esp_wifi_set_ps(NONE): %s", esp_err_to_name(err));
-        }
+    /* APSTA + Ethernet/NAPT: keep Wi-Fi powersave off so SoftAP ↔ coexisting STA path does not
+     * stall forwarded traffic when STA is idle (Ethernet is primary uplink here). */
+    esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_set_ps(NONE): %s", esp_err_to_name(err));
     }
+}
+
+static void on_uplink_lost_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    (void)data;
+
+    if (id == IP_EVENT_STA_LOST_IP) s_wifi_up = false;
+    if (id == IP_EVENT_ETH_LOST_IP) s_eth_up = false;
+
+    apply_default_route(choose_default_uplink());
+    softap_dhcps_full_config();
 }
 
 void system_wifi_dual_connect_init(void)
 {
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_uplink_got_ip, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &on_uplink_got_ip, NULL));
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0)
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP, &on_uplink_lost_ip, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_LOST_IP, &on_uplink_lost_ip, NULL));
+#endif
 
     // Initial SoftAP DHCP/NAPT setup.
     softap_dhcps_full_config();

@@ -338,12 +338,21 @@ esp_err_t esp_bridge_eth_spi_init(esp_netif_t* eth_netif_spi)
     }
 
     if (eth_handle_spi) {
-        /* The SPI Ethernet module might not have a burned factory MAC address, we can set it manually.
-        02:00:00 is a Locally Administered OUI range so should not be used except when testing on a LAN under your control.
-        */
-        ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle_spi, ETH_CMD_S_MAC_ADDR, (uint8_t[]) {
-            0x02, 0x00, 0x00, 0x12, 0x34, 0x56
-        }));
+        /* IDF SPI Ethernet basic example uses ESP_MAC_ETH + esp_derive_local_mac (not Wi-Fi base). */
+        uint8_t eth_mac[6];
+        uint8_t base_mac[6];
+        if (esp_read_mac(base_mac, ESP_MAC_ETH) == ESP_OK) {
+            ESP_ERROR_CHECK(esp_derive_local_mac(eth_mac, base_mac));
+        } else if (esp_read_mac(base_mac, ESP_MAC_WIFI_STA) == ESP_OK) {
+            eth_mac[0] = (uint8_t)((base_mac[0] | 0x02) & ~0x01);
+            memcpy(eth_mac + 1, base_mac + 1, 5);
+            eth_mac[5] = (uint8_t)(eth_mac[5] + 2);
+        } else {
+            memcpy(eth_mac, (const uint8_t[]){0x02, 0x00, 0x00, 0x12, 0x34, 0x56}, 6);
+        }
+        ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle_spi, ETH_CMD_S_MAC_ADDR, eth_mac));
+        ESP_LOGI(TAG, "SPI eth MAC set to %02x:%02x:%02x:%02x:%02x:%02x",
+                 eth_mac[0], eth_mac[1], eth_mac[2], eth_mac[3], eth_mac[4], eth_mac[5]);
 
         // attach Ethernet driver to TCP/IP stack
 #if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
@@ -393,8 +402,54 @@ static esp_err_t eth_io_transmit_wrap(void *h, void *buffer, size_t len, void *n
     return eth_io_transmit(h, buffer, len);
 }
 
+#if CONFIG_BRIDGE_USE_SPI_ETHERNET
+/**
+ * SPI Ethernet WAN (DHCP only): do not use esp_bridge_create_netif()'s stub transmit +
+ * action_start/stop/attach sequence — on IDF 5.x lwIP can end up with dhcpc STARTED forever
+ * and no lease (TX/RX or DHCP state confused). Match IDF examples: new netif, attach glue, start MAC.
+ */
+static esp_netif_t *esp_bridge_create_spi_eth_wan_netif_clean(void)
+{
+    esp_netif_inherent_config_t esp_netif_common_config = {
+        .get_ip_event = IP_EVENT_ETH_GOT_IP,
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0)
+        .lost_ip_event = IP_EVENT_ETH_LOST_IP,
+#endif
+        .if_key = "ETH_WAN",
+        .if_desc = "eth",
+        .flags = (esp_netif_flags_t)(ESP_NETIF_FLAG_GARP | ESP_NETIF_FLAG_EVENT_IP_MODIFIED | ESP_NETIF_DHCP_CLIENT),
+        .route_prio = 50,
+    };
+
+    esp_netif_config_t eth_config = ESP_NETIF_DEFAULT_ETH();
+    eth_config.base = &esp_netif_common_config;
+
+    esp_netif_t *netif = esp_netif_new(&eth_config);
+    if (!netif) {
+        return NULL;
+    }
+
+    esp_bridge_eth_event_handler_register();
+    ESP_ERROR_CHECK(esp_bridge_eth_spi_init(netif));
+    /* Do not call esp_netif_up() here — IDF ethernet/basic leaves netif down until
+     * ETHERNET_EVENT_CONNECTED; early UP + DHCP with link still down breaks lwIP DHCP on SPI ETH.
+     */
+
+    ESP_LOGI(TAG, "[%-12s]", esp_netif_get_ifkey(netif));
+
+    esp_bridge_netif_list_add(netif, NULL, NULL);
+
+    return netif;
+}
+#endif /* CONFIG_BRIDGE_USE_SPI_ETHERNET */
+
 esp_netif_t* esp_bridge_create_eth_netif(esp_netif_ip_info_t* ip_info, uint8_t mac[6], bool data_forwarding, bool enable_dhcps)
 {
+#if CONFIG_BRIDGE_USE_SPI_ETHERNET
+    if (!data_forwarding && !enable_dhcps && ip_info == NULL && mac == NULL) {
+        return esp_bridge_create_spi_eth_wan_netif_clean();
+    }
+#endif
     esp_netif_ip_info_t netif_ip_info = { 0 };
     esp_netif_inherent_config_t esp_netif_common_config = {
         .get_ip_event = IP_EVENT_ETH_GOT_IP,

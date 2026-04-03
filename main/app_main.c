@@ -14,6 +14,7 @@
 #include "esp_bridge.h"
 #include "web_service.h"
 #include "system_wifi_dual_connect.h"
+#include "system_eth_uplink_debug.h"
 
 static esp_err_t esp_storage_init(void)
 {
@@ -39,5 +40,6 @@ void app_main(void)
 
     esp_bridge_create_all_netif();
     system_wifi_dual_connect_init();
+    system_eth_uplink_debug_init();
     ESP_ERROR_CHECK(web_service_start());
 }
