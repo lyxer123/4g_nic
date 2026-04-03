@@ -1,0 +1,19 @@
+menu "Application Wi-Fi (STA)"
+    depends on BRIDGE_EXTERNAL_NETIF_STATION
+
+    config APP_WIFI_STA_SSID
+        string "Default STA SSID (applied before Wi-Fi connect)"
+        default "HONOR300"
+        help
+            Written to Wi-Fi STA after ESP-IoT-Bridge creates interfaces. Override via web UI / NVS (wifi_cfg) if you use that path.
+
+    config APP_WIFI_STA_PASSWORD
+        string "Default STA password"
+        default "abc7178377"
+
+    config APP_STA_BAIDU_HTTP_PROBE
+        bool "After STA got IP, HTTP GET www.baidu.com (logs status)"
+        default y
+        help
+            Spawns a short task to verify DNS and TCP/80 through the Wi-Fi uplink.
+endmenu

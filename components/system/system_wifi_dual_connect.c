@@ -34,7 +34,7 @@ static uplink_t s_default = UPLINK_NONE;
 
 static void softap_napt_refresh(void)
 {
-#if CONFIG_LWIP_IPV4_NAPT
+#if CONFIG_BRIDGE_DATA_FORWARDING_NETIF_SOFTAP && CONFIG_LWIP_IPV4_NAPT
     esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     if (!ap) {
         return;
@@ -59,7 +59,7 @@ static void softap_napt_refresh(void)
     }
     ESP_LOGI(TAG, "NAPT enabled on SoftAP " IPSTR " (netif %c%c%d)", IP2STR(&ipi.ip), lw->name[0],
              lw->name[1], (int)lw->num);
-#endif
+#endif /* CONFIG_BRIDGE_DATA_FORWARDING_NETIF_SOFTAP && CONFIG_LWIP_IPV4_NAPT */
 }
 
 /**
@@ -71,6 +71,7 @@ static void softap_napt_refresh(void)
  */
 static void softap_dhcps_full_config(void)
 {
+#if CONFIG_BRIDGE_DATA_FORWARDING_NETIF_SOFTAP
     esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     if (!ap) {
         ESP_LOGW(TAG, "WIFI_AP_DEF missing, skip SoftAP DHCPS");
@@ -110,6 +111,7 @@ static void softap_dhcps_full_config(void)
     ESP_ERROR_CHECK(esp_netif_dhcps_start(ap));
     ESP_LOGI(TAG, "SoftAP DHCPS: DNS offer + lease pool + router (gw) reapplied");
     softap_napt_refresh();
+#endif
 }
 
 static esp_netif_t *get_uplink_netif(uplink_t u)
@@ -121,10 +123,15 @@ static esp_netif_t *get_uplink_netif(uplink_t u)
 
 static uplink_t choose_default_uplink(void)
 {
-    // Step (1)/(2): if only one uplink is up, choose it.
-    // If both are up (step (3) later), prefer ETH_WAN by default.
-    if (s_eth_up) return UPLINK_ETH_WAN;
-    if (s_wifi_up) return UPLINK_WIFI_STA;
+    // If both wired WAN and STA are up, prefer ETH_WAN; otherwise STA or none.
+#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET) || defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
+    if (s_eth_up) {
+        return UPLINK_ETH_WAN;
+    }
+#endif
+    if (s_wifi_up) {
+        return UPLINK_WIFI_STA;
+    }
     return UPLINK_NONE;
 }
 
@@ -143,14 +150,28 @@ static void apply_default_route(uplink_t u)
     ESP_LOGI(TAG, "Default route: uplink %s", esp_netif_get_ifkey(netif));
 }
 
+static bool ifkey_is_eth_wan(const ip_event_got_ip_t *ev)
+{
+    return ev && ev->esp_netif && strcmp(esp_netif_get_ifkey(ev->esp_netif), "ETH_WAN") == 0;
+}
+
 static void on_uplink_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
     (void)base;
 
     ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
-    if (id == IP_EVENT_STA_GOT_IP) s_wifi_up = true;
-    if (id == IP_EVENT_ETH_GOT_IP) s_eth_up = true;
+    if (id == IP_EVENT_STA_GOT_IP) {
+        s_wifi_up = true;
+    }
+#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET) || defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
+    if (id == IP_EVENT_ETH_GOT_IP && ifkey_is_eth_wan(ev)) {
+        s_eth_up = true;
+    }
+#else
+    (void)ifkey_is_eth_wan;
+    (void)ev;
+#endif
 
     // Update default route according to current policy.
     apply_default_route(choose_default_uplink());
@@ -158,8 +179,7 @@ static void on_uplink_got_ip(void *arg, esp_event_base_t base, int32_t id, void 
     // After iot-bridge handler (DNS update / possible deauth): reapply SoftAP DHCP/NAPT.
     softap_dhcps_full_config();
 
-    /* APSTA + Ethernet/NAPT: keep Wi-Fi powersave off so SoftAP ↔ coexisting STA path does not
-     * stall forwarded traffic when STA is idle (Ethernet is primary uplink here). */
+    /* Bridge / APSTA: keep Wi-Fi powersave off so coexisting STA (+ optional SoftAP) forwarding does not stall. */
     esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "esp_wifi_set_ps(NONE): %s", esp_err_to_name(err));
@@ -170,10 +190,20 @@ static void on_uplink_lost_ip(void *arg, esp_event_base_t base, int32_t id, void
 {
     (void)arg;
     (void)base;
-    (void)data;
 
-    if (id == IP_EVENT_STA_LOST_IP) s_wifi_up = false;
-    if (id == IP_EVENT_ETH_LOST_IP) s_eth_up = false;
+    if (id == IP_EVENT_STA_LOST_IP) {
+        s_wifi_up = false;
+    }
+#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET) || defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
+    if (id == IP_EVENT_ETH_LOST_IP) {
+        ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
+        if (ifkey_is_eth_wan(ev)) {
+            s_eth_up = false;
+        }
+    }
+#else
+    (void)data;
+#endif
 
     apply_default_route(choose_default_uplink());
     softap_dhcps_full_config();

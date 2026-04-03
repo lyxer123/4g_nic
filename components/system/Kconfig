@@ -9,17 +9,50 @@ menu "System options"
 
     config SYSTEM_ETH_WAN_STATIC_IP_STR
         string "ETH_WAN static IP address"
-        default "192.168.0.105"
+        default "192.168.137.105"
         depends on SYSTEM_ETH_WAN_USE_STATIC_IP
 
     config SYSTEM_ETH_WAN_STATIC_GW_STR
         string "ETH_WAN default gateway"
-        default "192.168.0.1"
+        default "192.168.137.1"
         depends on SYSTEM_ETH_WAN_USE_STATIC_IP
 
     config SYSTEM_ETH_WAN_STATIC_NM_STR
         string "ETH_WAN netmask"
         default "255.255.255.0"
         depends on SYSTEM_ETH_WAN_USE_STATIC_IP
+
+    config SYSTEM_ETH_WAN_DNS_USE_GATEWAY_AS_MAIN
+        bool "Use default gateway as primary DNS (recommended for Windows ICS / shared Ethernet)"
+        default y
+        depends on SYSTEM_ETH_WAN_USE_STATIC_IP
+        help
+            ICS (192.168.x.1) usually proxies DNS only when clients use the host as resolver; direct UDP/53
+            to 114.114.114.114 etc. often fails. Uncheck when your gateway is a normal router and you want a
+            custom primary DNS (then set ETH_WAN static DNS below).
+
+    config SYSTEM_ETH_WAN_STATIC_DNS_MAIN_STR
+        string "ETH_WAN static DNS (main), IPv4"
+        default "114.114.114.114"
+        depends on SYSTEM_ETH_WAN_USE_STATIC_IP && !SYSTEM_ETH_WAN_DNS_USE_GATEWAY_AS_MAIN
+        help
+            Ignored when "Use default gateway as primary DNS" is enabled.
+
+    config SYSTEM_ETH_WAN_STATIC_DNS_BACKUP_STR
+        string "ETH_WAN static DNS (backup), IPv4"
+        default "8.8.8.8"
+        depends on SYSTEM_ETH_WAN_USE_STATIC_IP
+
+    config SYSTEM_ETH_UPLINK_HTTP_CHECK
+        bool "After ETH_WAN has IPv4, run HTTP probe (baidu: IP path + optional DNS name)"
+        default y
+        help
+            First uses a configurable baidu CDN IPv4 + Host header (no DNS). Then tries http://www.baidu.com/
+            to test DNS. On ICS, UDP/53 to public resolvers is often blocked while TCP/80 still works.
+
+    config SYSTEM_ETH_UPLINK_CHECK_BAIDU_IP_STR
+        string "HTTP WAN probe: baidu edge IPv4 (CDN; change if probe breaks)"
+        default "39.156.66.10"
+        depends on SYSTEM_ETH_UPLINK_HTTP_CHECK
 
 endmenu

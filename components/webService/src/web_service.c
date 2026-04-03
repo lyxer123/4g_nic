@@ -4,7 +4,6 @@
 #include <sys/stat.h>
 
 #include "cJSON.h"
-#include "esp_bridge.h"
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_http_server.h"
@@ -124,7 +123,7 @@ static esp_err_t apply_sta_config(const char *ssid, const char *password)
     strlcpy((char *)cfg.sta.password, password, sizeof(cfg.sta.password));
     cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
-    ESP_RETURN_ON_ERROR(esp_bridge_wifi_set_config(WIFI_IF_STA, &cfg), TAG, "set sta config failed");
+    ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &cfg), TAG, "set sta config failed");
     return esp_wifi_connect();
 }
 
