@@ -234,13 +234,26 @@
     }
   }
 
-  function onClearClick() {
+  async function onClearClick() {
     setForm('', '');
     setResultBoxVisible(false);
     try {
       localStorage.removeItem(LS_KEYS.sta);
     } catch (_) {}
-    toast('已清空');
+
+    try {
+      const res = await fetch('/api/wifi/clear', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || (data && data.status === 'error')) {
+        const msg = data && data.message ? data.message : `HTTP ${res.status}`;
+        throw new Error(msg);
+      }
+      toast('设备 STA 已清空');
+      setStatus(false, '未连接');
+    } catch (e) {
+      toast(`清空设备失败：${e && e.message ? e.message : '未知错误'}`, true);
+      setStatus(false, '设备离线/接口未实现');
+    }
   }
 
   function bind() {

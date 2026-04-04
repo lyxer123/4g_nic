@@ -9,7 +9,9 @@
 #include "esp_http_server.h"
 #include "esp_littlefs.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_wifi.h"
+#include "esp_wifi_default.h"
 #include "nvs.h"
 #include "web_service.h"
 
@@ -74,8 +76,48 @@ err:
     return ret;
 }
 
+static esp_err_t clear_sta_from_nvs(void)
+{
+    nvs_handle_t nvs = 0;
+    esp_err_t ret = nvs_open("wifi_cfg", NVS_READWRITE, &nvs);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    /* Erase keys; if keys don't exist treat it as success. */
+    esp_err_t r1 = nvs_erase_key(nvs, "sta_ssid");
+    esp_err_t r2 = nvs_erase_key(nvs, "sta_pwd");
+    esp_err_t r = ESP_OK;
+    if (r1 != ESP_OK && r1 != ESP_ERR_NVS_NOT_FOUND) r = r1;
+    if (r2 != ESP_OK && r2 != ESP_ERR_NVS_NOT_FOUND) r = r2;
+
+    if (r == ESP_OK) {
+        r = nvs_commit(nvs);
+    } else {
+        /* Still try to commit so erasures take effect even if one key missing. */
+        nvs_commit(nvs);
+    }
+
+    nvs_close(nvs);
+    return r;
+}
+
 static esp_err_t apply_sta_config(const char *ssid, const char *password)
 {
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    ESP_RETURN_ON_ERROR(esp_wifi_get_mode(&mode), TAG, "get wifi mode failed");
+
+    /* SoftAP-only bridge leaves WiFi in AP mode; STA config requires APSTA (or STA). */
+    if (mode == WIFI_MODE_AP) {
+        ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_APSTA), TAG, "set APSTA failed");
+    } else if (mode != WIFI_MODE_STA && mode != WIFI_MODE_APSTA) {
+        ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_APSTA), TAG, "set APSTA failed");
+    }
+
+    if (esp_netif_get_handle_from_ifkey("WIFI_STA_DEF") == NULL) {
+        esp_netif_create_default_wifi_sta();
+    }
+
     wifi_config_t cfg = {0};
     strlcpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid));
     strlcpy((char *)cfg.sta.password, password, sizeof(cfg.sta.password));
@@ -182,6 +224,22 @@ static esp_err_t uri_wifi_post(httpd_req_t *req)
     return send_json(req, 200, "{\"status\":\"success\"}");
 }
 
+static esp_err_t uri_wifi_clear_post(httpd_req_t *req)
+{
+    (void)req;
+    esp_err_t ret = clear_sta_from_nvs();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "clear sta from nvs failed: %s", esp_err_to_name(ret));
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"clear failed\"}");
+    }
+
+    /* Stop current STA connection attempts (NVS cleared, so after reset it won't auto-connect). */
+    esp_wifi_disconnect();
+    esp_wifi_set_mode(WIFI_MODE_AP);
+
+    return send_json(req, 200, "{\"status\":\"success\"}");
+}
+
 static esp_err_t uri_wifi_scan_get(httpd_req_t *req)
 {
     const int max_aps = 20;
@@ -252,6 +310,13 @@ static esp_err_t register_handlers(httpd_handle_t server)
     };
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &wifi_post), TAG, "register wifi post failed");
 
+    httpd_uri_t wifi_clear_post = {
+        .uri = "/api/wifi/clear",
+        .method = HTTP_POST,
+        .handler = uri_wifi_clear_post,
+    };
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &wifi_clear_post), TAG, "register wifi clear post failed");
+
     httpd_uri_t wifi_scan = {
         .uri = "/api/wifi/scan",
         .method = HTTP_GET,
@@ -274,7 +339,7 @@ esp_err_t web_service_start(void)
     const esp_vfs_littlefs_conf_t conf = {
         .base_path = "/www",
         .partition_label = "www",
-        .format_if_mount_failed = false,
+        .format_if_mount_failed = true,
         .dont_mount = false,
     };
     ESP_RETURN_ON_ERROR(esp_vfs_littlefs_register(&conf), TAG, "mount /www failed");
