@@ -363,16 +363,27 @@ esp_err_t esp_bridge_eth_spi_init(esp_netif_t* eth_netif_spi)
 }
 #endif // CONFIG_BRIDGE_USE_SPI_ETHERNET
 
+#if CONFIG_BRIDGE_USE_INTERNAL_ETHERNET
 static esp_err_t esp_bridge_eth_reset_phy(void)
 {
     phy->reset_hw(phy);
     ESP_LOGW(TAG, "Hardware Reset Ethernet PHY");
     return ESP_OK;
 }
+#endif
 
 static esp_err_t eth_netif_dhcp_status_change_cb(esp_ip_addr_t *ip_info)
 {
+    /* dns_change_cb passes NULL: upstream DNS pushed to DHCPS netif — must not reset SPI PHY. */
+    if (ip_info == NULL) {
+        return ESP_OK;
+    }
+#if CONFIG_BRIDGE_USE_SPI_ETHERNET
+    (void)ip_info;
+    return ESP_OK;
+#else
     return esp_bridge_eth_reset_phy();
+#endif
 }
 
 static void eth_driver_free_rx_buffer(void *h, void* buffer)

@@ -1,6 +1,8 @@
 dependencies:
-  cmake_utilities:
-    dependencies: []
+  espressif/cmake_utilities:
+    dependencies:
+    - name: idf
+      version: '>=4.1'
     source:
       path: F:\github\esp-iot-solution\tools\cmake_utilities
       type: local
@@ -118,7 +120,7 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.5.4
+    version: 5.1.6
   joltwallet/littlefs:
     component_hash: dcea25bcef2de023f089f5f01e8d8c46ad1b8ffef75861ad5ffb4098555839df
     dependencies:
@@ -130,9 +132,10 @@ dependencies:
       type: service
     version: 1.20.4
 direct_dependencies:
+- espressif/cmake_utilities
 - espressif/iot_bridge
 - idf
 - joltwallet/littlefs
-manifest_hash: c90387fbe201908e731351571d6043e64c9c7f242e01fa65ab132ae639a6c1e9
+manifest_hash: 6a3bb82b91e6049530d908b11c844f86b2003683a3a0ac626bdb6ae8f57dbdfa
 target: esp32s3
 version: 2.0.0

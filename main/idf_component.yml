@@ -1,3 +1,7 @@
 dependencies:
-  espressif/iot_bridge: "*"
+  # Satisfy iot_bridge optional dep without hitting the registry (offline / firewall).
+  # Same tree as root CMakeLists.txt EXTRA_COMPONENT_DIRS (sibling of 4g_nic).
+  espressif/cmake_utilities:
+    path: ../../esp-iot-solution/tools/cmake_utilities
+  espressif/iot_bridge: "1.0.2"
   joltwallet/littlefs: "*"
