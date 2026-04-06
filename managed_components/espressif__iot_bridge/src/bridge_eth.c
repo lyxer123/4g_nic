@@ -200,6 +200,7 @@ esp_err_t esp_spi_eth_new_ksz8851snl(spi_device_interface_config_t *spi_devcfg, 
     esp_eth_mac_t *mac_spi;
     // Init MAC and PHY configs to default
     eth_mac_config_t mac_config_spi = ETH_MAC_DEFAULT_CONFIG();
+    mac_config_spi.rx_task_stack_size = 4096;
     eth_phy_config_t phy_config_spi = ETH_PHY_DEFAULT_CONFIG();
 
     // KSZ8851SNL ethernet driver is based on spi driver
@@ -234,6 +235,7 @@ esp_err_t esp_spi_eth_new_dm9051(spi_device_interface_config_t *spi_devcfg, esp_
     esp_eth_mac_t *mac_spi;
     // Init MAC and PHY configs to default
     eth_mac_config_t mac_config_spi = ETH_MAC_DEFAULT_CONFIG();
+    mac_config_spi.rx_task_stack_size = 4096;
     eth_phy_config_t phy_config_spi = ETH_PHY_DEFAULT_CONFIG();
 
     // dm9051 ethernet driver is based on spi driver
@@ -268,6 +270,7 @@ esp_err_t esp_spi_eth_new_w5500(spi_device_interface_config_t *spi_devcfg, esp_n
     esp_eth_mac_t *mac_spi;
     // Init MAC and PHY configs to default
     eth_mac_config_t mac_config_spi = ETH_MAC_DEFAULT_CONFIG();
+    mac_config_spi.rx_task_stack_size = 4096;
     eth_phy_config_t phy_config_spi = ETH_PHY_DEFAULT_CONFIG();
 
     // w5500 ethernet driver is based on spi driver
@@ -353,10 +356,16 @@ esp_err_t esp_bridge_eth_spi_init(esp_netif_t* eth_netif_spi)
 #endif
     }
 
-    if (!eth_is_start) {
+    if (!eth_is_start && eth_handle_spi != NULL) {
         /* start Ethernet driver state machine */
         ret = esp_eth_start(eth_handle_spi);
-        eth_is_start = true;
+        if (ret == ESP_OK) {
+            eth_is_start = true;
+        } else {
+            ESP_LOGE(TAG, "esp_eth_start failed: %s", esp_err_to_name(ret));
+            esp_eth_driver_uninstall(eth_handle_spi);
+            eth_handle_spi = NULL;
+        }
     }
 
     return ret;
@@ -441,6 +450,7 @@ esp_netif_t* esp_bridge_create_eth_netif(esp_netif_ip_info_t* ip_info, uint8_t m
 
     esp_netif_t* netif = esp_bridge_create_netif(&eth_config, ip_info, mac, enable_dhcps);
     if (netif) {
+        esp_err_t eth_init_ret = ESP_FAIL;
 #if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
         if (data_forwarding) {
             esp_bridge_set_eth_lan_netif(netif);
@@ -450,10 +460,14 @@ esp_netif_t* esp_bridge_create_eth_netif(esp_netif_ip_info_t* ip_info, uint8_t m
 #endif
         esp_netif_action_stop(netif, NULL, 0, NULL);
 #if CONFIG_BRIDGE_USE_INTERNAL_ETHERNET
-        esp_bridge_eth_init(netif);
+        eth_init_ret = esp_bridge_eth_init(netif);
 #elif CONFIG_BRIDGE_USE_SPI_ETHERNET
-        esp_bridge_eth_spi_init(netif);
+        eth_init_ret = esp_bridge_eth_spi_init(netif);
 #endif
+        if (eth_init_ret != ESP_OK) {
+            ESP_LOGE(TAG, "[%-12s] ethernet init failed, skip netif up/NAPT", esp_netif_get_ifkey(netif));
+            return netif;
+        }
         esp_netif_up(netif);
 
         ESP_LOGI(TAG, "[%-12s]", esp_netif_get_ifkey(netif));

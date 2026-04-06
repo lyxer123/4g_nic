@@ -3,6 +3,13 @@
 
 # 4G NIC example
 
+## Version Matrix
+
+- ESP-IDF: `v5.2.6` (currently validated for this project)
+- ESP-IoT-Bridge: `1.0.2` (`espressif/iot_bridge`)
+
+> Note: Earlier debugging records also include `ESP-IDF v5.1.x` for comparison. Refer to `调试.md` for details.
+
 ## Overview
 
 This example focuses on the networking part, enabling packet forwarding between network interfaces. It can be connected to PC or MCU through multiple network interfaces (ETH/SPI/SDIO), and ESP32 series chips use NAT to forward data packets in and out of the PPP network interface.
