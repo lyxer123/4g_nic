@@ -17,6 +17,7 @@
 
 #include "esp_bridge.h"
 #include "web_service.h"
+#include "system_hw_presence.h"
 #include "system_wifi_dual_connect.h"
 #include "system_sta_baidu_probe.h"
 #if CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET
@@ -64,6 +65,8 @@ void app_main(void)
     /* Init and register system/core components */
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    system_hw_presence_probe_before_bridge();
 
     esp_bridge_create_all_netif();
 #if CONFIG_BRIDGE_EXTERNAL_NETIF_STATION

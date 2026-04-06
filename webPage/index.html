@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>4G_NIC Wi-Fi STA 设置</title>
+  <title>4G_NIC 控制台</title>
   <link rel="icon" href="data:," />
   <link rel="stylesheet" href="css/style.css" />
 </head>
@@ -11,10 +11,10 @@
   <div class="container">
     <header class="header">
       <div class="logo">
-        <div class="logo-mark">Wi-Fi</div>
+        <div class="logo-mark">NIC</div>
         <div class="logo-text">
           <div class="logo-title">4G_NIC</div>
-          <div class="logo-subtitle">STA 配网</div>
+          <div class="logo-subtitle">Web 控制台</div>
         </div>
       </div>
       <div class="header-right">
@@ -25,58 +25,121 @@
       </div>
     </header>
 
+    <nav class="nav-tabs" role="tablist" aria-label="页面">
+      <button type="button" class="nav-tab active" data-view="overview" id="tabOverview">总览</button>
+      <button type="button" class="nav-tab" data-view="settings" id="tabSettings">模式与网络</button>
+    </nav>
+
     <main class="main-content">
-      <section>
-        <h2>Wi-Fi Station（STA）设置</h2>
+      <section id="viewOverview" class="view-panel" aria-labelledby="tabOverview">
+        <h2>运行总览</h2>
+        <p class="page-lead">当前接口地址、硬件探测结果与已保存的工作模式。切换「模式与网络」可修改 NVS 中的模式偏好（完整拓扑通常需对应 menuconfig 并重启后生效）。</p>
+        <div class="toolbar">
+          <button class="btn btn-secondary" id="overviewRefresh" type="button">刷新数据</button>
+        </div>
+        <div class="card overview-card">
+          <div class="card-body">
+            <dl class="kv-grid" id="overviewGrid">
+              <div class="kv-row"><dt>加载中</dt><dd id="overviewPlaceholder">请稍候…</dd></div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <section id="viewSettings" class="view-panel" hidden aria-labelledby="tabSettings">
+        <h2>工作模式与网络参数</h2>
+        <p class="page-lead">可选模式由编译选项与运行时检测（W5500、USB 4G Cat1）共同决定。需要 STA 作 WAN 的模式会显示下方「STA 设置」卡片（与原先页面一致）。</p>
 
         <div class="card">
           <div class="card-header">
-            <h3>连接上级路由器</h3>
+            <h3>硬件与模式</h3>
           </div>
           <div class="card-body">
-            <div class="form-row">
-              <div class="form-group">
-                <label for="wifiSsidInput">SSID</label>
-                <div class="ssid-input-group">
-                  <input id="wifiSsidInput" type="text" placeholder="选择或输入 Wi-Fi 名称" autocomplete="off" />
-                  <button class="btn btn-secondary" id="wifiScanBtn" type="button">扫描</button>
-                </div>
-                <div class="available-ssids" id="availableSsidsBox" style="display:none;">
-                  <div class="available-ssids-header">
-                    <span>可用 SSID</span>
-                    <button class="btn btn-link" type="button" id="ssidListCloseBtn">关闭</button>
-                  </div>
-                  <ul id="availableSsidsList"></ul>
-                </div>
-                <span class="form-hint">点击“扫描”获取附近热点，点击列表项会自动填入 SSID。</span>
-              </div>
-
-              <div class="form-group">
-                <label for="wifiPasswordInput">密码</label>
-                <input id="wifiPasswordInput" type="password" placeholder="请输入 Wi-Fi 密码（可为空表示开放网络）" autocomplete="new-password" />
-                <span class="form-hint">WPA/WPA2 通常需要 ≥ 8 位；开放网络可留空。</span>
-              </div>
+            <dl class="kv-grid kv-compact" id="hwSummary">
+              <div class="kv-row"><dt>W5500</dt><dd id="hwW5500">—</dd></div>
+              <div class="kv-row"><dt>USB 模块(启动枚举)</dt><dd id="hwUsbProbe">—</dd></div>
+              <div class="kv-row"><dt>USB 作 4G 上行</dt><dd id="hwUsbWan">—</dd></div>
+              <div class="kv-row"><dt>USB VID:PID</dt><dd id="hwUsbIds">—</dd></div>
+            </dl>
+            <p class="form-hint mode-api-error" id="modeApiErrorHint" style="display:none;"></p>
+            <p class="form-hint" id="noModesHint" style="display:none;">当前硬件或固件配置下没有可用的工作模式，请检查 W5500 / USB 模块与 menuconfig 中的网桥选项。</p>
+            <div class="form-group mode-select-row">
+              <label for="workModeSelect">工作模式</label>
+              <select id="workModeSelect" class="select-input" disabled>
+                <option value="">加载中…</option>
+              </select>
             </div>
-
             <div class="form-actions">
-              <button class="btn btn-primary" id="saveBtn" type="button">保存/修改</button>
-              <button class="btn btn-secondary" id="loadBtn" type="button">从设备读取</button>
-              <button class="btn btn-danger" id="clearBtn" type="button">清空</button>
+              <button class="btn btn-primary" id="modeSaveBtn" type="button" disabled>保存模式到设备</button>
             </div>
+            <p class="form-hint" id="modeSaveHint" style="display:none;"></p>
+            <p class="form-hint mode-invalid-hint" id="modeInvalidHint" style="display:none;"></p>
+          </div>
+        </div>
 
-            <div class="result-box" id="resultBox" style="display:none;">
-              <div class="result-title">当前保存的 STA 配置</div>
-              <div class="result-grid">
-                <div class="result-item">
-                  <div class="result-label">SSID</div>
-                  <div class="result-value" id="savedSsid">—</div>
+        <div class="card wan-lan-card">
+          <div class="card-header">
+            <h3>当前所选：WAN / LAN 说明</h3>
+          </div>
+          <div class="card-body">
+            <dl class="kv-grid kv-compact">
+              <div class="kv-row"><dt>WAN（上行）</dt><dd id="wanDesc">—</dd></div>
+              <div class="kv-row"><dt>LAN（下行/共享）</dt><dd id="lanDesc">—</dd></div>
+            </dl>
+          </div>
+        </div>
+
+        <div id="staSection" class="sta-section" style="display:none;">
+          <h2 class="section-title">Wi-Fi Station（STA）设置</h2>
+          <div class="card">
+            <div class="card-header">
+              <h3>连接上级路由器（STA WAN）</h3>
+            </div>
+            <div class="card-body">
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="wifiSsidInput">SSID</label>
+                  <div class="ssid-input-group">
+                    <input id="wifiSsidInput" type="text" placeholder="选择或输入 Wi-Fi 名称" autocomplete="off" />
+                    <button class="btn btn-secondary" id="wifiScanBtn" type="button">扫描</button>
+                  </div>
+                  <div class="available-ssids" id="availableSsidsBox" style="display:none;">
+                    <div class="available-ssids-header">
+                      <span>可用 SSID</span>
+                      <button class="btn btn-link" type="button" id="ssidListCloseBtn">关闭</button>
+                    </div>
+                    <ul id="availableSsidsList"></ul>
+                  </div>
+                  <span class="form-hint">点击「扫描」获取附近热点，点击列表项会自动填入 SSID。</span>
                 </div>
-                <div class="result-item">
-                  <div class="result-label">密码</div>
-                  <div class="result-value" id="savedPwd">—</div>
+
+                <div class="form-group">
+                  <label for="wifiPasswordInput">密码</label>
+                  <input id="wifiPasswordInput" type="password" placeholder="请输入 Wi-Fi 密码（可为空表示开放网络）" autocomplete="new-password" />
+                  <span class="form-hint">WPA/WPA2 通常需要 ≥ 8 位；开放网络可留空。</span>
                 </div>
               </div>
-              <div class="result-hint">注意：为了安全，实际设备侧接口建议不要返回明文密码；本页仅用于演示/调试。</div>
+
+              <div class="form-actions">
+                <button class="btn btn-primary" id="saveBtn" type="button">保存/修改</button>
+                <button class="btn btn-secondary" id="loadBtn" type="button">从设备读取</button>
+                <button class="btn btn-danger" id="clearBtn" type="button">清空</button>
+              </div>
+
+              <div class="result-box" id="resultBox" style="display:none;">
+                <div class="result-title">当前保存的 STA 配置</div>
+                <div class="result-grid">
+                  <div class="result-item">
+                    <div class="result-label">SSID</div>
+                    <div class="result-value" id="savedSsid">—</div>
+                  </div>
+                  <div class="result-item">
+                    <div class="result-label">密码</div>
+                    <div class="result-value" id="savedPwd">—</div>
+                  </div>
+                </div>
+                <div class="result-hint">为安全起见，设备接口不返回明文密码；此处密码栏为本地/表单状态。</div>
+              </div>
             </div>
           </div>
         </div>
@@ -84,7 +147,7 @@
     </main>
 
     <footer class="footer">
-      <p>页面目录：<code>webPage/</code>（前端仅实现 STA 扫描与保存）</p>
+      <p>静态资源目录：<code>webPage/</code> · API：<code>/api/system/overview</code>、<code>/api/mode</code>、<code>/api/wifi*</code></p>
     </footer>
   </div>
 
@@ -95,4 +158,3 @@
   <script src="js/app.js"></script>
 </body>
 </html>
-

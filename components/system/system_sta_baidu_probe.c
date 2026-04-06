@@ -27,7 +27,6 @@ static void baidu_probe_task(void *arg)
     esp_http_client_config_t cfg = {
         .url = "http://www.baidu.com/",
         .timeout_ms = 15000,
-        .addr_type = HTTP_ADDR_TYPE_INET,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {

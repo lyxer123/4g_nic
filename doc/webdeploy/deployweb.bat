@@ -30,18 +30,18 @@ if errorlevel 1 (
     echo esptool is available
 )
 
-REM Flash offsets MUST match project root partitions_large.csv (www partition only).
-REM   www: offset 0xC76000, size 0x25800 (150KB)
-set "OFFSET=0xC76000"
+REM Flash offsets MUST match project root partitions_4mb.csv (www partition only).
+REM   www: offset 0x380000, size 0x25800 (150KB) — 4MB flash layout
+set "OFFSET=0x380000"
 set "WWW_SIZE=153600"
 REM Port: use ESPPORT env if set, else default COM5
-if not defined ESPPORT set "ESPPORT=COM5"
+if not defined ESPPORT set "ESPPORT=COM6"
 echo.
 echo ========================================
-echo Using www partition offset: !OFFSET! size 0x25800 (150KB) - see partitions_large.csv
+echo Using www partition offset: !OFFSET! size 0x25800 (150KB) - see partitions_4mb.csv
 echo ========================================
 echo.
-echo Note: Offset must match partition table. After flash, verify in serial: "Found partition \"www\": offset=0xC76000"
+echo Note: Offset must match partition table. After flash, verify in serial: "Found partition \"www\": offset=0x380000"
 echo.
 
 REM Source = repo webPage/ folder; output = this script's directory
@@ -100,7 +100,7 @@ if errorlevel 1 (
     echo   2. Is device in flash mode (hold BOOT button while pressing RESET)?
     echo   3. Is partition offset address correct? Expected: !OFFSET!
     echo   4. Did you rebuild the project after changing partition table?
-    echo   5. Check build\partition_table\partition-table.csv for actual offset
+    echo   5. Check build\partition_table\partition-table.csv or partitions_4mb.csv for actual offset
     pause
     exit /b 1
 ) else (

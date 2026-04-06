@@ -13,11 +13,186 @@
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
 #include "nvs.h"
+#include "esp_timer.h"
+#include "esp_system.h"
+#include "system_w5500_detect.h"
+#include "system_usb_cat1_detect.h"
 #include "web_service.h"
 
 static const char *TAG = "web_service";
 static httpd_handle_t s_server = NULL;
 static bool s_running = false;
+
+#define NVS_NS_UI      "bridge_ui"
+#define NVS_KEY_MODE   "work_mode"
+
+static esp_err_t load_work_mode_u8(uint8_t *out)
+{
+    nvs_handle_t h = 0;
+    esp_err_t e = nvs_open(NVS_NS_UI, NVS_READONLY, &h);
+    if (e != ESP_OK) {
+        return e;
+    }
+    e = nvs_get_u8(h, NVS_KEY_MODE, out);
+    nvs_close(h);
+    return e;
+}
+
+static esp_err_t save_work_mode_u8(uint8_t v)
+{
+    nvs_handle_t h = 0;
+    esp_err_t e = nvs_open(NVS_NS_UI, NVS_READWRITE, &h);
+    if (e != ESP_OK) {
+        return e;
+    }
+    e = nvs_set_u8(h, NVS_KEY_MODE, v);
+    if (e == ESP_OK) {
+        e = nvs_commit(h);
+    }
+    nvs_close(h);
+    return e;
+}
+
+/** Boot-time USB enumeration matched a known Cat1/modem (independent of menuconfig WAN role). */
+static bool hw_usb_modem_probe(void)
+{
+#if CONFIG_SYSTEM_USB_CAT1_DETECT
+    return system_usb_cat1_detect_present();
+#else
+    return false;
+#endif
+}
+
+/** USB modem usable as external WAN in this build (modem netif enabled in menuconfig + probe hit). */
+static bool hw_usb_lte(void)
+{
+#if CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM
+    return system_usb_cat1_detect_present();
+#else
+    return false;
+#endif
+}
+
+static bool hw_w5500(void)
+{
+    return system_w5500_detect_present();
+}
+
+static bool cap_softap(void)
+{
+#if CONFIG_BRIDGE_DATA_FORWARDING_NETIF_SOFTAP
+    return true;
+#else
+    return false;
+#endif
+}
+
+static bool cap_eth_lan(void)
+{
+#if CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET
+    return hw_w5500();
+#else
+    return false;
+#endif
+}
+
+static bool cap_sta_wan(void)
+{
+#if CONFIG_BRIDGE_EXTERNAL_NETIF_STATION
+    return true;
+#else
+    return false;
+#endif
+}
+
+static bool cap_modem_wan(void)
+{
+    return hw_usb_lte();
+}
+
+static bool cap_eth_wan_softap(void)
+{
+#if CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET && !CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET && CONFIG_BRIDGE_DATA_FORWARDING_NETIF_SOFTAP
+    return hw_w5500();
+#else
+    return false;
+#endif
+}
+
+static bool work_mode_allowed(uint8_t id)
+{
+    switch (id) {
+    case 1:
+        return cap_modem_wan() && cap_softap();
+    case 2:
+        return cap_modem_wan() && cap_eth_lan();
+    case 3:
+        return cap_modem_wan() && cap_softap() && cap_eth_lan();
+    case 4:
+        return cap_sta_wan() && cap_softap();
+    case 5:
+        return cap_sta_wan() && cap_eth_lan();
+    case 6:
+        return cap_sta_wan() && cap_softap() && cap_eth_lan();
+    case 7:
+        return cap_eth_wan_softap();
+    default:
+        return false;
+    }
+}
+
+static void mode_push(cJSON *arr, uint8_t id, const char *label, bool needs_sta)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "id", id);
+    cJSON_AddStringToObject(o, "label", label);
+    cJSON_AddBoolToObject(o, "needs_sta", needs_sta);
+    cJSON_AddItemToArray(arr, o);
+}
+
+static cJSON *json_build_mode_list(void)
+{
+    cJSON *arr = cJSON_CreateArray();
+    if (work_mode_allowed(1)) {
+        mode_push(arr, 1, "4G -> Wi-Fi (SoftAP)", false);
+    }
+    if (work_mode_allowed(2)) {
+        mode_push(arr, 2, "4G -> W5500 (ETH_LAN)", false);
+    }
+    if (work_mode_allowed(3)) {
+        mode_push(arr, 3, "4G -> Wi-Fi + W5500", false);
+    }
+    if (work_mode_allowed(4)) {
+        mode_push(arr, 4, "Wi-Fi STA -> SoftAP", true);
+    }
+    if (work_mode_allowed(5)) {
+        mode_push(arr, 5, "Wi-Fi STA -> W5500 (ETH_LAN)", true);
+    }
+    if (work_mode_allowed(6)) {
+        mode_push(arr, 6, "Wi-Fi STA -> Wi-Fi + W5500", true);
+    }
+    if (work_mode_allowed(7)) {
+        mode_push(arr, 7, "W5500 WAN -> SoftAP only", false);
+    }
+    return arr;
+}
+
+static void json_add_netif_ip(cJSON *root, const char *name, const char *ifkey)
+{
+    esp_netif_t *n = esp_netif_get_handle_from_ifkey(ifkey);
+    if (!n) {
+        cJSON_AddNullToObject(root, name);
+        return;
+    }
+    esp_netif_ip_info_t ip = {0};
+    if (esp_netif_get_ip_info(n, &ip) != ESP_OK) {
+        cJSON_AddNullToObject(root, name);
+        return;
+    }
+    char buf[20];
+    esp_ip4addr_ntoa(&ip.ip, buf, sizeof(buf));
+    cJSON_AddStringToObject(root, name, buf);
+}
 
 static const char *content_type(const char *path)
 {
@@ -294,6 +469,158 @@ static esp_err_t uri_wifi_scan_get(httpd_req_t *req)
     return err;
 }
 
+static esp_err_t uri_system_hw_get(httpd_req_t *req)
+{
+    uint16_t vid = 0;
+    uint16_t pid = 0;
+    system_usb_cat1_detect_last_ids(&vid, &pid);
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+             "{\"w5500\":%s,\"usb_modem_present\":%s,\"usb_lte\":%s,\"usb_vid\":\"0x%04x\",\"usb_pid\":\"0x%04x\"}",
+             hw_w5500() ? "true" : "false",
+             hw_usb_modem_probe() ? "true" : "false",
+             hw_usb_lte() ? "true" : "false",
+             (unsigned)vid, (unsigned)pid);
+    return send_json(req, 200, buf);
+}
+
+static esp_err_t uri_system_overview_get(httpd_req_t *req)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"oom\"}");
+    }
+
+    wifi_mode_t wm = WIFI_MODE_NULL;
+    if (esp_wifi_get_mode(&wm) == ESP_OK) {
+        const char *ms = "null";
+        if (wm == WIFI_MODE_STA) {
+            ms = "STA";
+        } else if (wm == WIFI_MODE_AP) {
+            ms = "AP";
+        } else if (wm == WIFI_MODE_APSTA) {
+            ms = "APSTA";
+        }
+        cJSON_AddStringToObject(root, "wifi_mode", ms);
+    } else {
+        cJSON_AddNullToObject(root, "wifi_mode");
+    }
+
+    json_add_netif_ip(root, "ip_softap", "WIFI_AP_DEF");
+    json_add_netif_ip(root, "ip_sta", "WIFI_STA_DEF");
+    json_add_netif_ip(root, "ip_eth_lan", "ETH_LAN");
+    json_add_netif_ip(root, "ip_eth_wan", "ETH_WAN");
+    json_add_netif_ip(root, "ip_ppp", "PPP_DEF");
+
+    cJSON_AddNumberToObject(root, "free_heap", (double)esp_get_free_heap_size());
+    cJSON_AddNumberToObject(root, "uptime_s", (double)(esp_timer_get_time() / 1000000LL));
+
+    cJSON_AddBoolToObject(root, "hw_w5500", hw_w5500());
+    cJSON_AddBoolToObject(root, "hw_usb_modem_present", hw_usb_modem_probe());
+    cJSON_AddBoolToObject(root, "hw_usb_lte", hw_usb_lte());
+
+    uint8_t mode = 0;
+    if (load_work_mode_u8(&mode) == ESP_OK && mode <= 7) {
+        cJSON_AddNumberToObject(root, "saved_work_mode", mode);
+    } else {
+        cJSON_AddNullToObject(root, "saved_work_mode");
+    }
+
+    char *out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!out) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"oom\"}");
+    }
+    esp_err_t e = send_json(req, 200, out);
+    free(out);
+    return e;
+}
+
+static esp_err_t uri_mode_get(httpd_req_t *req)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"oom\"}");
+    }
+
+    uint8_t cur = 0;
+    esp_err_t le = load_work_mode_u8(&cur);
+    if (le == ESP_OK && cur >= 1 && cur <= 7) {
+        cJSON_AddNumberToObject(root, "current", cur);
+    } else {
+        cJSON_AddNumberToObject(root, "current", 0);
+    }
+
+    cJSON *hw = cJSON_CreateObject();
+    if (!hw) {
+        cJSON_Delete(root);
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"oom\"}");
+    }
+    cJSON_AddBoolToObject(hw, "w5500", hw_w5500());
+    cJSON_AddBoolToObject(hw, "usb_modem_present", hw_usb_modem_probe());
+    cJSON_AddBoolToObject(hw, "usb_lte", hw_usb_lte());
+    uint16_t vid = 0;
+    uint16_t pid = 0;
+    system_usb_cat1_detect_last_ids(&vid, &pid);
+    char idbuf[32];
+    snprintf(idbuf, sizeof(idbuf), "0x%04x:0x%04x", (unsigned)vid, (unsigned)pid);
+    cJSON_AddStringToObject(hw, "usb_ids", idbuf);
+    cJSON_AddItemToObject(root, "hardware", hw);
+
+    cJSON *modes = json_build_mode_list();
+    if (!modes) {
+        cJSON_Delete(root);
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"oom\"}");
+    }
+    cJSON_AddItemToObject(root, "modes", modes);
+
+    char *out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!out) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"oom\"}");
+    }
+    esp_err_t e = send_json(req, 200, out);
+    free(out);
+    return e;
+}
+
+static esp_err_t uri_mode_post(httpd_req_t *req)
+{
+    char body[128] = {0};
+    int len = req->content_len;
+    if (len <= 0 || len >= (int)sizeof(body)) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
+    }
+    int r = httpd_req_recv(req, body, len);
+    if (r <= 0) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"recv failed\"}");
+    }
+    body[r] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
+    }
+    cJSON *mid = cJSON_GetObjectItem(root, "mode");
+    if (!cJSON_IsNumber(mid) || mid->valuedouble < 1 || mid->valuedouble > 7) {
+        cJSON_Delete(root);
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"mode 1..7 required\"}");
+    }
+    uint8_t m = (uint8_t)mid->valuedouble;
+    cJSON_Delete(root);
+
+    if (!work_mode_allowed(m)) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"mode not allowed for this hardware/build\"}");
+    }
+
+    esp_err_t ret = save_work_mode_u8(m);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "save work_mode: %s", esp_err_to_name(ret));
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"nvs save failed\"}");
+    }
+    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"Saved. Full WAN/LAN switch may require menuconfig build + reboot; STA Wi-Fi still applied live.\"}");
+}
+
 static esp_err_t register_handlers(httpd_handle_t server)
 {
     httpd_uri_t wifi_get = {
@@ -324,6 +651,34 @@ static esp_err_t register_handlers(httpd_handle_t server)
     };
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &wifi_scan), TAG, "register wifi scan failed");
 
+    httpd_uri_t sys_hw = {
+        .uri = "/api/system/hw",
+        .method = HTTP_GET,
+        .handler = uri_system_hw_get,
+    };
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &sys_hw), TAG, "register system hw failed");
+
+    httpd_uri_t sys_over = {
+        .uri = "/api/system/overview",
+        .method = HTTP_GET,
+        .handler = uri_system_overview_get,
+    };
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &sys_over), TAG, "register overview failed");
+
+    httpd_uri_t mode_get = {
+        .uri = "/api/mode",
+        .method = HTTP_GET,
+        .handler = uri_mode_get,
+    };
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &mode_get), TAG, "register mode get failed");
+
+    httpd_uri_t mode_post = {
+        .uri = "/api/mode",
+        .method = HTTP_POST,
+        .handler = uri_mode_post,
+    };
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &mode_post), TAG, "register mode post failed");
+
     httpd_uri_t static_get = {
         .uri = "/*",
         .method = HTTP_GET,
@@ -346,7 +701,7 @@ esp_err_t web_service_start(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 24;
     /* Default ~4KB stack is too small for scan + LittleFS + TLS-style call depth */
     config.stack_size = 12288;
     config.task_priority = 5;

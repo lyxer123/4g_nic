@@ -1,5 +1,71 @@
 menu "System options"
 
+    config SYSTEM_HW_DETECT_W5500
+        bool "Probe W5500 (VERSIONR) before bridge SPI Ethernet init"
+        default y
+        depends on ETH_SPI_ETHERNET_W5500 && BRIDGE_USE_SPI_ETHERNET
+        help
+            Briefly owns the SPI bus, pulses PHY RST if configured, reads VERSIONR (expect 0x04).
+            Must run before esp_bridge_create_all_netif(). Uses CONFIG_BRIDGE_ETH_SPI_* pins.
+
+    config SYSTEM_USB_CAT1_DETECT
+        bool "Boot USB Cat.1 / LTE modem enumeration (independent of Bridge Modem netif)"
+        default y
+        depends on SOC_USB_OTG_SUPPORTED
+        help
+            Runs on every boot before the bridge creates netifs. Does NOT require "External netif Modem"
+            or BRIDGE_SERIAL_VIA_USB: use this to detect USB LTE hardware for logs and the web UI even when
+            the current build uses only STA/Ethernet uplink. Installs usb_host briefly, matches VID/PID
+            (ML307C 0x2ecc:0x3012 + optional extras), then uninstalls. Disable if this conflicts with
+            TinyUSB or another USB stack on the same OTG port.
+
+    config SYSTEM_USB_CAT1_ENUM_TIMEOUT_MS
+        int "USB modem probe enumeration timeout (ms)"
+        default 10000
+        depends on SYSTEM_USB_CAT1_DETECT
+        range 500 30000
+
+    config SYSTEM_USB_CAT1_ENABLE_GPIO
+        int "Cat1 modem power/enable GPIO (-1 = unused)"
+        default -1
+        depends on SYSTEM_USB_CAT1_DETECT
+        range -1 48
+        help
+            Many boards use a GPIO to enable DC-DC or nRESET (e.g. EN). Assert this level before
+            usb_host enumerates so the module can power up and appear on USB. Match your schematic.
+
+    config SYSTEM_USB_CAT1_ENABLE_ACTIVE_HIGH
+        bool "Enable GPIO active high (uncheck if EN is active-low)"
+        default y
+        depends on SYSTEM_USB_CAT1_DETECT
+
+    config SYSTEM_USB_CAT1_ENABLE_SETTLE_MS
+        int "Delay after enable GPIO before USB enumerate (ms)"
+        default 2000
+        depends on SYSTEM_USB_CAT1_DETECT
+        range 0 30000
+        help
+            USB host runs after this delay so the modem can exit reset and boot firmware.
+
+    config SYSTEM_USB_CAT1_EXTRA_VID
+        hex "Extra USB VID to accept (0=disable)"
+        default 0
+        depends on SYSTEM_USB_CAT1_DETECT
+        help
+            If non-zero with EXTRA_PID, accept this VID/PID in addition to built-in table (verify with lsusb for ML307C).
+
+    config SYSTEM_USB_CAT1_EXTRA_PID
+        hex "Extra USB PID to accept (0=disable)"
+        default 0
+        depends on SYSTEM_USB_CAT1_DETECT
+
+    config SYSTEM_USB_CAT1_ACCEPT_ANY_CDC
+        bool "Also accept any device with CDC COMM+DATA interfaces (less reliable)"
+        default n
+        depends on SYSTEM_USB_CAT1_DETECT
+        help
+            If y, a composite CDC modem without a listed VID/PID may be reported as present. Prefer fixing VID/PID table.
+
     config SYSTEM_ETH_WAN_USE_STATIC_IP
         bool "ETH_WAN use static IPv4 (skip DHCP)"
         default n
