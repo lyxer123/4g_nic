@@ -7,6 +7,8 @@
 
 [ip4_napt.patch]
     path = esp-idf/components/lwip/lwip
+    idf_version < 5.2.0
 
 [lwip_napt.patch]
     path = esp-idf/components/lwip/lwip
+    idf_version < 5.2.0
