@@ -25,6 +25,22 @@ static bool s_running = false;
 
 #define NVS_NS_UI      "bridge_ui"
 #define NVS_KEY_MODE   "work_mode"
+#define NVS_NS_ETH_WAN "eth_wan"
+#define NVS_KEY_DHCP   "dhcp"
+#define NVS_KEY_IP     "ip"
+#define NVS_KEY_MASK   "mask"
+#define NVS_KEY_GW     "gw"
+#define NVS_KEY_DNS1   "dns1"
+#define NVS_KEY_DNS2   "dns2"
+
+typedef struct {
+    bool dhcp;
+    char ip[16];
+    char mask[16];
+    char gw[16];
+    char dns1[16];
+    char dns2[16];
+} eth_wan_cfg_t;
 
 static esp_err_t load_work_mode_u8(uint8_t *out)
 {
@@ -53,6 +69,86 @@ static esp_err_t save_work_mode_u8(uint8_t v)
     return e;
 }
 
+static void eth_wan_cfg_default(eth_wan_cfg_t *cfg)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->dhcp = true;
+}
+
+static esp_err_t load_eth_wan_cfg(eth_wan_cfg_t *cfg)
+{
+    nvs_handle_t h = 0;
+    eth_wan_cfg_default(cfg);
+    esp_err_t e = nvs_open(NVS_NS_ETH_WAN, NVS_READONLY, &h);
+    if (e != ESP_OK) {
+        return e;
+    }
+
+    uint8_t dhcp = 1;
+    if (nvs_get_u8(h, NVS_KEY_DHCP, &dhcp) == ESP_OK) {
+        cfg->dhcp = (dhcp != 0);
+    }
+
+    size_t n = sizeof(cfg->ip);
+    if (nvs_get_str(h, NVS_KEY_IP, cfg->ip, &n) != ESP_OK) cfg->ip[0] = '\0';
+    n = sizeof(cfg->mask);
+    if (nvs_get_str(h, NVS_KEY_MASK, cfg->mask, &n) != ESP_OK) cfg->mask[0] = '\0';
+    n = sizeof(cfg->gw);
+    if (nvs_get_str(h, NVS_KEY_GW, cfg->gw, &n) != ESP_OK) cfg->gw[0] = '\0';
+    n = sizeof(cfg->dns1);
+    if (nvs_get_str(h, NVS_KEY_DNS1, cfg->dns1, &n) != ESP_OK) cfg->dns1[0] = '\0';
+    n = sizeof(cfg->dns2);
+    if (nvs_get_str(h, NVS_KEY_DNS2, cfg->dns2, &n) != ESP_OK) cfg->dns2[0] = '\0';
+    nvs_close(h);
+    return ESP_OK;
+}
+
+static esp_err_t save_eth_wan_cfg(const eth_wan_cfg_t *cfg)
+{
+    nvs_handle_t h = 0;
+    esp_err_t e = nvs_open(NVS_NS_ETH_WAN, NVS_READWRITE, &h);
+    if (e != ESP_OK) {
+        return e;
+    }
+    e = nvs_set_u8(h, NVS_KEY_DHCP, cfg->dhcp ? 1 : 0);
+    if (e == ESP_OK) e = nvs_set_str(h, NVS_KEY_IP, cfg->ip);
+    if (e == ESP_OK) e = nvs_set_str(h, NVS_KEY_MASK, cfg->mask);
+    if (e == ESP_OK) e = nvs_set_str(h, NVS_KEY_GW, cfg->gw);
+    if (e == ESP_OK) e = nvs_set_str(h, NVS_KEY_DNS1, cfg->dns1);
+    if (e == ESP_OK) e = nvs_set_str(h, NVS_KEY_DNS2, cfg->dns2);
+    if (e == ESP_OK) e = nvs_commit(h);
+    nvs_close(h);
+    return e;
+}
+
+static esp_err_t clear_eth_wan_cfg(void)
+{
+    nvs_handle_t h = 0;
+    esp_err_t e = nvs_open(NVS_NS_ETH_WAN, NVS_READWRITE, &h);
+    if (e != ESP_OK) {
+        return e;
+    }
+    nvs_erase_key(h, NVS_KEY_DHCP);
+    nvs_erase_key(h, NVS_KEY_IP);
+    nvs_erase_key(h, NVS_KEY_MASK);
+    nvs_erase_key(h, NVS_KEY_GW);
+    nvs_erase_key(h, NVS_KEY_DNS1);
+    nvs_erase_key(h, NVS_KEY_DNS2);
+    e = nvs_commit(h);
+    nvs_close(h);
+    return e;
+}
+
+static bool ip_text_valid(const char *v)
+{
+    if (!v) return false;
+    if (v[0] == '\0') return true;
+    int a, b, c, d;
+    char tail = 0;
+    if (sscanf(v, "%d.%d.%d.%d%c", &a, &b, &c, &d, &tail) != 4) return false;
+    return a >= 0 && a <= 255 && b >= 0 && b <= 255 && c >= 0 && c <= 255 && d >= 0 && d <= 255;
+}
+
 /** Boot-time USB enumeration matched a known Cat1/modem (independent of menuconfig WAN role). */
 static bool hw_usb_modem_probe(void)
 {
@@ -63,14 +159,10 @@ static bool hw_usb_modem_probe(void)
 #endif
 }
 
-/** USB modem usable as external WAN in this build (modem netif enabled in menuconfig + probe hit). */
+/** USB modem presence from boot-time probe; UI modes are hardware-driven. */
 static bool hw_usb_lte(void)
 {
-#if CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM
-    return system_usb_cat1_detect_present();
-#else
-    return false;
-#endif
+    return hw_usb_modem_probe();
 }
 
 static bool hw_w5500(void)
@@ -80,29 +172,17 @@ static bool hw_w5500(void)
 
 static bool cap_softap(void)
 {
-#if CONFIG_BRIDGE_DATA_FORWARDING_NETIF_SOFTAP
     return true;
-#else
-    return false;
-#endif
 }
 
 static bool cap_eth_lan(void)
 {
-#if CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET
     return hw_w5500();
-#else
-    return false;
-#endif
 }
 
 static bool cap_sta_wan(void)
 {
-#if CONFIG_BRIDGE_EXTERNAL_NETIF_STATION
     return true;
-#else
-    return false;
-#endif
 }
 
 static bool cap_modem_wan(void)
@@ -112,11 +192,7 @@ static bool cap_modem_wan(void)
 
 static bool cap_eth_wan_softap(void)
 {
-#if CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET && !CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET && CONFIG_BRIDGE_DATA_FORWARDING_NETIF_SOFTAP
     return hw_w5500();
-#else
-    return false;
-#endif
 }
 
 static bool work_mode_allowed(uint8_t id)
@@ -469,6 +545,81 @@ static esp_err_t uri_wifi_scan_get(httpd_req_t *req)
     return err;
 }
 
+static esp_err_t uri_eth_wan_get(httpd_req_t *req)
+{
+    eth_wan_cfg_t cfg;
+    load_eth_wan_cfg(&cfg);
+    char resp[256];
+    snprintf(resp, sizeof(resp),
+             "{\"dhcp\":%s,\"ip\":\"%s\",\"mask\":\"%s\",\"gw\":\"%s\",\"dns1\":\"%s\",\"dns2\":\"%s\"}",
+             cfg.dhcp ? "true" : "false", cfg.ip, cfg.mask, cfg.gw, cfg.dns1, cfg.dns2);
+    return send_json(req, 200, resp);
+}
+
+static esp_err_t uri_eth_wan_post(httpd_req_t *req)
+{
+    char body[320] = {0};
+    int len = req->content_len;
+    if (len <= 0 || len >= (int)sizeof(body)) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
+    }
+    int r = httpd_req_recv(req, body, len);
+    if (r <= 0) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"recv failed\"}");
+    }
+    body[r] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
+    }
+
+    cJSON *dhcp = cJSON_GetObjectItem(root, "dhcp");
+    cJSON *ip = cJSON_GetObjectItem(root, "ip");
+    cJSON *mask = cJSON_GetObjectItem(root, "mask");
+    cJSON *gw = cJSON_GetObjectItem(root, "gw");
+    cJSON *dns1 = cJSON_GetObjectItem(root, "dns1");
+    cJSON *dns2 = cJSON_GetObjectItem(root, "dns2");
+    if (!cJSON_IsBool(dhcp) || !cJSON_IsString(ip) || !cJSON_IsString(mask)
+        || !cJSON_IsString(gw) || !cJSON_IsString(dns1) || !cJSON_IsString(dns2)) {
+        cJSON_Delete(root);
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"dhcp/ip/mask/gw/dns1/dns2 required\"}");
+    }
+    if (!ip_text_valid(ip->valuestring) || !ip_text_valid(mask->valuestring)
+        || !ip_text_valid(gw->valuestring) || !ip_text_valid(dns1->valuestring)
+        || !ip_text_valid(dns2->valuestring)) {
+        cJSON_Delete(root);
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid ipv4 text\"}");
+    }
+
+    eth_wan_cfg_t cfg;
+    eth_wan_cfg_default(&cfg);
+    cfg.dhcp = cJSON_IsTrue(dhcp);
+    snprintf(cfg.ip, sizeof(cfg.ip), "%s", ip->valuestring);
+    snprintf(cfg.mask, sizeof(cfg.mask), "%s", mask->valuestring);
+    snprintf(cfg.gw, sizeof(cfg.gw), "%s", gw->valuestring);
+    snprintf(cfg.dns1, sizeof(cfg.dns1), "%s", dns1->valuestring);
+    snprintf(cfg.dns2, sizeof(cfg.dns2), "%s", dns2->valuestring);
+    cJSON_Delete(root);
+
+    esp_err_t e = save_eth_wan_cfg(&cfg);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "save eth wan cfg failed: %s", esp_err_to_name(e));
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"nvs save failed\"}");
+    }
+    return send_json(req, 200, "{\"status\":\"success\"}");
+}
+
+static esp_err_t uri_eth_wan_clear_post(httpd_req_t *req)
+{
+    (void)req;
+    esp_err_t e = clear_eth_wan_cfg();
+    if (e != ESP_OK) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"clear failed\"}");
+    }
+    return send_json(req, 200, "{\"status\":\"success\"}");
+}
+
 static esp_err_t uri_system_hw_get(httpd_req_t *req)
 {
     uint16_t vid = 0;
@@ -518,6 +669,19 @@ static esp_err_t uri_system_overview_get(httpd_req_t *req)
     cJSON_AddBoolToObject(root, "hw_w5500", hw_w5500());
     cJSON_AddBoolToObject(root, "hw_usb_modem_present", hw_usb_modem_probe());
     cJSON_AddBoolToObject(root, "hw_usb_lte", hw_usb_lte());
+
+    eth_wan_cfg_t wan_cfg;
+    load_eth_wan_cfg(&wan_cfg);
+    cJSON *saved_eth_wan = cJSON_CreateObject();
+    if (saved_eth_wan) {
+        cJSON_AddBoolToObject(saved_eth_wan, "dhcp", wan_cfg.dhcp);
+        cJSON_AddStringToObject(saved_eth_wan, "ip", wan_cfg.ip);
+        cJSON_AddStringToObject(saved_eth_wan, "mask", wan_cfg.mask);
+        cJSON_AddStringToObject(saved_eth_wan, "gw", wan_cfg.gw);
+        cJSON_AddStringToObject(saved_eth_wan, "dns1", wan_cfg.dns1);
+        cJSON_AddStringToObject(saved_eth_wan, "dns2", wan_cfg.dns2);
+        cJSON_AddItemToObject(root, "saved_eth_wan", saved_eth_wan);
+    }
 
     uint8_t mode = 0;
     if (load_work_mode_u8(&mode) == ESP_OK && mode <= 7) {
@@ -610,7 +774,7 @@ static esp_err_t uri_mode_post(httpd_req_t *req)
     cJSON_Delete(root);
 
     if (!work_mode_allowed(m)) {
-        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"mode not allowed for this hardware/build\"}");
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"mode not allowed for this hardware\"}");
     }
 
     esp_err_t ret = save_work_mode_u8(m);
@@ -618,7 +782,7 @@ static esp_err_t uri_mode_post(httpd_req_t *req)
         ESP_LOGE(TAG, "save work_mode: %s", esp_err_to_name(ret));
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"nvs save failed\"}");
     }
-    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"Saved. Full WAN/LAN switch may require menuconfig build + reboot; STA Wi-Fi still applied live.\"}");
+    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"Saved to NVS. Parameters are persistent across reboot.\"}");
 }
 
 static esp_err_t register_handlers(httpd_handle_t server)
@@ -650,6 +814,27 @@ static esp_err_t register_handlers(httpd_handle_t server)
         .handler = uri_wifi_scan_get,
     };
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &wifi_scan), TAG, "register wifi scan failed");
+
+    httpd_uri_t eth_wan_get = {
+        .uri = "/api/eth_wan",
+        .method = HTTP_GET,
+        .handler = uri_eth_wan_get,
+    };
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &eth_wan_get), TAG, "register eth wan get failed");
+
+    httpd_uri_t eth_wan_post = {
+        .uri = "/api/eth_wan",
+        .method = HTTP_POST,
+        .handler = uri_eth_wan_post,
+    };
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &eth_wan_post), TAG, "register eth wan post failed");
+
+    httpd_uri_t eth_wan_clear_post = {
+        .uri = "/api/eth_wan/clear",
+        .method = HTTP_POST,
+        .handler = uri_eth_wan_clear_post,
+    };
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &eth_wan_clear_post), TAG, "register eth wan clear failed");
 
     httpd_uri_t sys_hw = {
         .uri = "/api/system/hw",

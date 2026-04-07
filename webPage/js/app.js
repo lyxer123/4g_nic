@@ -4,6 +4,8 @@
   const API = {
     scan: '/api/wifi/scan',
     wifi: '/api/wifi',
+    ethWan: '/api/eth_wan',
+    ethWanClear: '/api/eth_wan/clear',
     mode: '/api/mode',
     overview: '/api/system/overview',
   };
@@ -273,6 +275,67 @@
     }
   }
 
+  function getEthWanForm() {
+    return {
+      dhcp: !!($('ethWanDhcp') && $('ethWanDhcp').checked),
+      ip: $('ethWanIp') ? $('ethWanIp').value.trim() : '',
+      mask: $('ethWanMask') ? $('ethWanMask').value.trim() : '',
+      gw: $('ethWanGw') ? $('ethWanGw').value.trim() : '',
+      dns1: $('ethWanDns1') ? $('ethWanDns1').value.trim() : '',
+      dns2: $('ethWanDns2') ? $('ethWanDns2').value.trim() : '',
+    };
+  }
+
+  function onEthWanDhcpChange() {
+    const disabled = !!($('ethWanDhcp') && $('ethWanDhcp').checked);
+    ['ethWanIp', 'ethWanMask', 'ethWanGw', 'ethWanDns1', 'ethWanDns2'].forEach((id) => {
+      const el = $(id);
+      if (el) el.disabled = disabled;
+    });
+  }
+
+  function setEthWanForm(data) {
+    if ($('ethWanDhcp')) $('ethWanDhcp').checked = !!(data && data.dhcp);
+    if ($('ethWanIp')) $('ethWanIp').value = data && data.ip ? String(data.ip) : '';
+    if ($('ethWanMask')) $('ethWanMask').value = data && data.mask ? String(data.mask) : '';
+    if ($('ethWanGw')) $('ethWanGw').value = data && data.gw ? String(data.gw) : '';
+    if ($('ethWanDns1')) $('ethWanDns1').value = data && data.dns1 ? String(data.dns1) : '';
+    if ($('ethWanDns2')) $('ethWanDns2').value = data && data.dns2 ? String(data.dns2) : '';
+    onEthWanDhcpChange();
+  }
+
+  async function fetchEthWanConfig() {
+    const res = await fetch(API.ethWan, { method: 'GET' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = data && data.message ? data.message : `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    setEthWanForm(data);
+  }
+
+  async function saveEthWanConfig() {
+    const res = await fetch(API.ethWan, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(getEthWanForm()),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || (data && data.status === 'error')) {
+      const msg = data && data.message ? data.message : `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+  }
+
+  async function clearEthWanConfig() {
+    const res = await fetch(API.ethWanClear, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || (data && data.status === 'error')) {
+      const msg = data && data.message ? data.message : `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+  }
+
   function fmtIp(v) {
     if (v === null || v === undefined) return '—';
     const s = String(v);
@@ -301,6 +364,9 @@
       ['W5500', fmtBool(data.hw_w5500)],
       ['USB 模块(枚举)', fmtBool(data.hw_usb_modem_present)],
       ['USB 作 4G WAN', fmtBool(data.hw_usb_lte)],
+      ['W5500 WAN 配置', data.saved_eth_wan
+        ? (data.saved_eth_wan.dhcp ? 'DHCP' : `Static ${data.saved_eth_wan.ip || '—'}`)
+        : '—'],
       ['已保存工作模式', data.saved_work_mode != null && data.saved_work_mode >= 1
         ? `${data.saved_work_mode} · ${MODE_LABEL_ZH[data.saved_work_mode] || ''}`
         : '未设置'],
@@ -356,11 +422,22 @@
     return opt && opt.dataset.needsSta === '1';
   }
 
+  function selectedModeNeedsEthWan() {
+    const sel = $('workModeSelect');
+    if (!sel || !sel.value) return false;
+    const id = parseInt(sel.value, 10);
+    return !Number.isNaN(id) && id === 7;
+  }
+
   function onWorkModeSelectChange() {
     const staBlock = $('staSection');
+    const ethWanBlock = $('ethWanSection');
     const id = parseInt($('workModeSelect').value, 10);
     if (staBlock) {
       staBlock.style.display = selectedModeNeedsSta() ? 'block' : 'none';
+    }
+    if (ethWanBlock) {
+      ethWanBlock.style.display = selectedModeNeedsEthWan() ? 'block' : 'none';
     }
     if (!Number.isNaN(id) && id >= 1) {
       updateWanLanDesc(id);
@@ -397,6 +474,7 @@
         throw new Error(msg);
       }
       renderHwSummary(data.hardware);
+      fetchEthWanConfig().catch(() => {});
 
       const modes = Array.isArray(data.modes) ? data.modes : [];
       sel.innerHTML = '';
@@ -405,12 +483,7 @@
         if (saveBtn) saveBtn.disabled = true;
         if (noHint) {
           noHint.style.display = 'block';
-          const wanOff = data.hardware && data.hardware.usb_modem_present && !data.hardware.usb_lte;
-          if (wanOff) {
-            noHint.textContent = '已枚举到 USB 模块，但当前固件未在 menuconfig 中启用「External netif Modem / USB 4G 上行」，因此不会出现 4G 相关模式。可开启 CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM 等后重新编译烧录。';
-          } else {
-            noHint.textContent = '当前硬件或固件配置下没有可用的工作模式，请检查 W5500 / USB 模块与 menuconfig 中的网桥选项。';
-          }
+          noHint.textContent = '当前硬件未检测到可用工作模式，请检查 W5500 / USB 模块是否已连接并被识别。';
         }
         const opt = document.createElement('option');
         opt.value = '';
@@ -498,7 +571,7 @@
       }
       toast('工作模式已写入 NVS');
       if (hint) {
-        hint.textContent = data.hint || '若与当前编译的网桥拓扑不一致，需调整 menuconfig 并重新烧录/重启。';
+        hint.textContent = data.hint || '已保存到 NVS，重启后仍会保留。';
         hint.style.display = 'block';
       }
       if ($('modeInvalidHint')) $('modeInvalidHint').style.display = 'none';
@@ -563,9 +636,48 @@
     }
   }
 
+  function bindEthWan() {
+    const dhcp = $('ethWanDhcp');
+    dhcp && dhcp.addEventListener('change', onEthWanDhcpChange);
+
+    const save = $('ethWanSaveBtn');
+    save && save.addEventListener('click', async () => {
+      try {
+        await saveEthWanConfig();
+        toast('W5500 WAN 参数已保存到 NVS');
+        fetchOverview();
+      } catch (e) {
+        toast(`保存失败：${e && e.message ? e.message : '未知错误'}`, true);
+      }
+    });
+
+    const load = $('ethWanLoadBtn');
+    load && load.addEventListener('click', async () => {
+      try {
+        await fetchEthWanConfig();
+        toast('W5500 WAN 参数已从设备读取');
+      } catch (e) {
+        toast(`读取失败：${e && e.message ? e.message : '未知错误'}`, true);
+      }
+    });
+
+    const clear = $('ethWanClearBtn');
+    clear && clear.addEventListener('click', async () => {
+      try {
+        await clearEthWanConfig();
+        setEthWanForm({ dhcp: true, ip: '', mask: '', gw: '', dns1: '', dns2: '' });
+        toast('W5500 WAN 参数已清空');
+        fetchOverview();
+      } catch (e) {
+        toast(`清空失败：${e && e.message ? e.message : '未知错误'}`, true);
+      }
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
     bindNav();
     bindSta();
+    bindEthWan();
     showView('overview');
   });
 })();

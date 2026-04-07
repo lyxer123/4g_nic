@@ -48,7 +48,7 @@
 
       <section id="viewSettings" class="view-panel" hidden aria-labelledby="tabSettings">
         <h2>工作模式与网络参数</h2>
-        <p class="page-lead">可选模式由编译选项与运行时检测（W5500、USB 4G Cat1）共同决定。需要 STA 作 WAN 的模式会显示下方「STA 设置」卡片（与原先页面一致）。</p>
+        <p class="page-lead">可选模式仅由运行时硬件检测（W5500、USB 4G Cat1）决定。需要 STA 作 WAN 的模式会显示「STA 设置」卡片；选择 W5500 作 WAN 的模式会显示对应参数卡片。</p>
 
         <div class="card">
           <div class="card-header">
@@ -62,7 +62,7 @@
               <div class="kv-row"><dt>USB VID:PID</dt><dd id="hwUsbIds">—</dd></div>
             </dl>
             <p class="form-hint mode-api-error" id="modeApiErrorHint" style="display:none;"></p>
-            <p class="form-hint" id="noModesHint" style="display:none;">当前硬件或固件配置下没有可用的工作模式，请检查 W5500 / USB 模块与 menuconfig 中的网桥选项。</p>
+            <p class="form-hint" id="noModesHint" style="display:none;">当前硬件未检测到可用工作模式，请检查 W5500 / USB 模块是否已连接并被识别。</p>
             <div class="form-group mode-select-row">
               <label for="workModeSelect">工作模式</label>
               <select id="workModeSelect" class="select-input" disabled>
@@ -140,6 +140,54 @@
                 </div>
                 <div class="result-hint">为安全起见，设备接口不返回明文密码；此处密码栏为本地/表单状态。</div>
               </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="ethWanSection" class="card" style="display:none;">
+          <div class="card-header">
+            <h3>W5500 作为 WAN 参数（保存到 NVS）</h3>
+          </div>
+          <div class="card-body">
+            <div class="form-row">
+              <div class="form-group">
+                <label>
+                  <input id="ethWanDhcp" type="checkbox" checked />
+                  使用 DHCP 自动获取
+                </label>
+                <span class="form-hint">关闭 DHCP 后可填写静态 IP、掩码、网关与 DNS。</span>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="ethWanIp">IP 地址</label>
+                <input id="ethWanIp" type="text" placeholder="例如 192.168.1.100" />
+              </div>
+              <div class="form-group">
+                <label for="ethWanMask">子网掩码</label>
+                <input id="ethWanMask" type="text" placeholder="例如 255.255.255.0" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="ethWanGw">网关</label>
+                <input id="ethWanGw" type="text" placeholder="例如 192.168.1.1" />
+              </div>
+              <div class="form-group">
+                <label for="ethWanDns1">DNS1</label>
+                <input id="ethWanDns1" type="text" placeholder="例如 223.5.5.5" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="ethWanDns2">DNS2</label>
+                <input id="ethWanDns2" type="text" placeholder="例如 8.8.8.8" />
+              </div>
+            </div>
+            <div class="form-actions">
+              <button class="btn btn-primary" id="ethWanSaveBtn" type="button">保存 WAN 参数</button>
+              <button class="btn btn-secondary" id="ethWanLoadBtn" type="button">读取 WAN 参数</button>
+              <button class="btn btn-danger" id="ethWanClearBtn" type="button">清空 WAN 参数</button>
             </div>
           </div>
         </div>
