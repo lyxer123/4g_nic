@@ -496,8 +496,29 @@ static esp_err_t uri_wifi_scan_get(httpd_req_t *req)
     const int max_aps = 20;
     const size_t json_cap = 3072;
 
+    /* Some modes may leave Wi-Fi in AP-only mode; scan requires STA capability. */
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    esp_err_t err = esp_wifi_get_mode(&mode);
+    if (err != ESP_OK) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"wifi not ready\"}");
+    }
+    if (mode == WIFI_MODE_AP) {
+        err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+        if (err != ESP_OK) {
+            return send_json(req, 400, "{\"status\":\"error\",\"message\":\"scan start failed\"}");
+        }
+    } else if (mode != WIFI_MODE_STA && mode != WIFI_MODE_APSTA) {
+        err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+        if (err != ESP_OK) {
+            return send_json(req, 400, "{\"status\":\"error\",\"message\":\"scan start failed\"}");
+        }
+    }
+    if (esp_netif_get_handle_from_ifkey("WIFI_STA_DEF") == NULL) {
+        esp_netif_create_default_wifi_sta();
+    }
+
     wifi_scan_config_t scan_cfg = {0};
-    esp_err_t err = esp_wifi_scan_start(&scan_cfg, true);
+    err = esp_wifi_scan_start(&scan_cfg, true);
     if (err != ESP_OK) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"scan start failed\"}");
     }
