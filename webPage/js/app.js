@@ -7,8 +7,13 @@
     ethWan: '/api/eth_wan',
     ethWanClear: '/api/eth_wan/clear',
     mode: '/api/mode',
+    modeApply: '/api/mode/apply',
+    modeStatus: '/api/mode/status',
     overview: '/api/system/overview',
   };
+
+  /** 最近一次 /api/mode 返回的 modes，用于 WAN/LAN 说明（优先于本地写死表） */
+  let sLastModeProfiles = null;
 
   const LS_KEYS = {
     sta: 'staConfig',
@@ -23,6 +28,8 @@
     5: 'Wi-Fi STA → W5500(LAN)',
     6: 'Wi-Fi STA → Wi-Fi + W5500',
     7: 'W5500(WAN) → 仅热点',
+    8: 'W5500(WAN) → W5500(LAN)',
+    9: 'W5500(WAN) → Wi-Fi + W5500',
   };
 
   const MODE_NET_ZH = {
@@ -33,7 +40,49 @@
     5: { wan: 'Wi-Fi STA', lan: 'W5500 作为下行以太网' },
     6: { wan: 'Wi-Fi STA', lan: 'SoftAP + W5500 同时作为 LAN' },
     7: { wan: 'W5500 作为上行 WAN', lan: '仅 Wi-Fi SoftAP（无 W5500 LAN 转发）' },
+    8: { wan: 'W5500 作为上行 WAN', lan: 'W5500 作为下行以太网（实验组合）' },
+    9: { wan: 'W5500 作为上行 WAN', lan: 'Wi-Fi SoftAP + W5500（实验组合）' },
   };
+
+  function wanTextFromBackendWanType(wanType) {
+    const t = Number(wanType);
+    if (t === 1) return 'USB 4G Cat1（PPP 等，由固件拨号）';
+    if (t === 2) return 'Wi-Fi STA 连接上级路由';
+    if (t === 3) return 'W5500 有线作上行 WAN';
+    return '—';
+  }
+
+  function lanTextFromBackendProfile(m) {
+    if (!m) return '—';
+    const parts = [];
+    if (m.lan_softap) parts.push('Wi-Fi SoftAP');
+    if (m.lan_eth) parts.push('W5500 以太网(LAN)');
+    if (parts.length === 0) return '无下行共享口';
+    return parts.join(' + ');
+  }
+
+  function modeDisplayLabel(m) {
+    if (!m) return '';
+    const zh = MODE_LABEL_ZH[m.id];
+    if (zh) return zh;
+    return typeof m.label === 'string' ? m.label : `模式 ${m.id}`;
+  }
+
+  function renderRuntimeStatus(st) {
+    const el = $('modeRuntimeStatus');
+    if (!el) return;
+    if (!st || typeof st !== 'object') {
+      el.style.display = 'none';
+      return;
+    }
+    const err = st.last_error != null && Number(st.last_error) !== 0
+      ? ` last_error=${st.last_error}`
+      : '';
+    const rb = st.rollback_last_apply ? '（上次应用失败已回滚）' : '';
+    el.textContent = `应用状态：当前运行模式 ${st.current_mode || '—'}，目标 ${st.target_mode || '—'}，` +
+      `阶段 ${st.phase || '—'}， applying=${!!st.applying}${rb}${err}`;
+    el.style.display = 'block';
+  }
 
   function $(id) {
     return document.getElementById(id);
@@ -368,8 +417,11 @@
         ? (data.saved_eth_wan.dhcp ? 'DHCP' : `Static ${data.saved_eth_wan.ip || '—'}`)
         : '—'],
       ['已保存工作模式', data.saved_work_mode != null && data.saved_work_mode >= 1
-        ? `${data.saved_work_mode} · ${MODE_LABEL_ZH[data.saved_work_mode] || ''}`
+        ? `${data.saved_work_mode} · ${data.saved_work_mode_label || MODE_LABEL_ZH[data.saved_work_mode] || ''}`
         : '未设置'],
+      ['模式运行时', data.mode_runtime && data.mode_runtime.phase
+        ? `模式 ${data.mode_runtime.current_mode || '—'} / ${data.mode_runtime.phase}`
+        : '—'],
     ];
 
     grid.innerHTML = rows.map(([dt, dd]) =>
@@ -404,8 +456,15 @@
   function updateWanLanDesc(modeId) {
     const wan = $('wanDesc');
     const lan = $('lanDesc');
-    const n = MODE_NET_ZH[modeId];
     if (!wan || !lan) return;
+    const list = sLastModeProfiles || [];
+    const m = list.find(x => x.id === modeId);
+    if (m) {
+      wan.textContent = wanTextFromBackendWanType(m.wan_type);
+      lan.textContent = lanTextFromBackendProfile(m);
+      return;
+    }
+    const n = MODE_NET_ZH[modeId];
     if (!n) {
       wan.textContent = '—';
       lan.textContent = '—';
@@ -425,8 +484,8 @@
   function selectedModeNeedsEthWan() {
     const sel = $('workModeSelect');
     if (!sel || !sel.value) return false;
-    const id = parseInt(sel.value, 10);
-    return !Number.isNaN(id) && id === 7;
+    const opt = sel.options[sel.selectedIndex];
+    return opt && opt.dataset.needsEthWan === '1';
   }
 
   function onWorkModeSelectChange() {
@@ -464,6 +523,7 @@
     const sel = $('workModeSelect');
     const noHint = $('noModesHint');
     const saveBtn = $('modeSaveBtn');
+    const applyBtn = $('modeApplyBtn');
     const invalidHint = $('modeInvalidHint');
     showModeApiError('');
     try {
@@ -474,13 +534,17 @@
         throw new Error(msg);
       }
       renderHwSummary(data.hardware);
+      renderRuntimeStatus(data.runtime_status);
       fetchEthWanConfig().catch(() => {});
 
       const modes = Array.isArray(data.modes) ? data.modes : [];
+      sLastModeProfiles = modes;
       sel.innerHTML = '';
       if (modes.length === 0) {
+        sLastModeProfiles = null;
         sel.disabled = true;
         if (saveBtn) saveBtn.disabled = true;
+        if (applyBtn) applyBtn.disabled = true;
         if (noHint) {
           noHint.style.display = 'block';
           noHint.textContent = '当前硬件未检测到可用工作模式，请检查 W5500 / USB 模块是否已连接并被识别。';
@@ -497,6 +561,7 @@
       if (noHint) noHint.style.display = 'none';
       sel.disabled = false;
       if (saveBtn) saveBtn.disabled = false;
+      if (applyBtn) applyBtn.disabled = false;
 
       const placeholder = document.createElement('option');
       placeholder.value = '';
@@ -507,16 +572,17 @@
         const m = modes[i];
         const opt = document.createElement('option');
         opt.value = String(m.id);
-        const zh = MODE_LABEL_ZH[m.id] || m.label || `模式 ${m.id}`;
-        opt.textContent = `${m.id}. ${zh}`;
+        const label = modeDisplayLabel(m);
+        opt.textContent = `${m.id}. ${label}`;
         opt.dataset.needsSta = m.needs_sta ? '1' : '0';
+        opt.dataset.needsEthWan = m.needs_eth_wan ? '1' : '0';
         sel.appendChild(opt);
       }
 
       const cur = data.current;
       const allowed = modes.some(x => x.id === cur);
       if (invalidHint) {
-        if (cur >= 1 && cur <= 7 && !allowed) {
+        if (cur >= 1 && !allowed) {
           invalidHint.textContent = `NVS 中保存的模式 ${cur} 在当前硬件下不可用，请重新选择并保存。`;
           invalidHint.style.display = 'block';
         } else {
@@ -539,6 +605,7 @@
       sel.appendChild(opt);
       sel.disabled = true;
       if (saveBtn) saveBtn.disabled = true;
+      if ($('modeApplyBtn')) $('modeApplyBtn').disabled = true;
       const raw = e && e.message ? String(e.message) : '未知错误';
       let detail = raw;
       if (/HTTP\s+404/i.test(raw) || raw === 'Failed to fetch') {
@@ -569,16 +636,50 @@
         const msg = data && data.message ? data.message : `HTTP ${res.status}`;
         throw new Error(msg);
       }
-      toast('工作模式已写入 NVS');
+      toast('工作模式已保存并尝试应用');
       if (hint) {
         hint.textContent = data.hint || '已保存到 NVS，重启后仍会保留。';
         hint.style.display = 'block';
       }
       if ($('modeInvalidHint')) $('modeInvalidHint').style.display = 'none';
       fetchOverview();
+      fetchModeRuntimeOnly();
     } catch (e) {
       toast(`保存失败：${e && e.message ? e.message : '未知错误'}`, true);
     }
+  }
+
+  async function onModeApplyOnlyClick() {
+    const sel = $('workModeSelect');
+    const id = parseInt(sel.value, 10);
+    const body = (!sel.value || Number.isNaN(id)) ? '{}' : JSON.stringify({ mode: id });
+    try {
+      const res = await fetch(API.modeApply, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || (data && data.status === 'error')) {
+        const msg = data && data.message ? data.message : `HTTP ${res.status}`;
+        throw new Error(msg);
+      }
+      toast('已请求应用当前模式');
+      await fetchModeRuntimeOnly();
+      fetchOverview();
+    } catch (e) {
+      toast(`应用失败：${e && e.message ? e.message : '未知错误'}`, true);
+    }
+  }
+
+  async function fetchModeRuntimeOnly() {
+    try {
+      const res = await fetch(API.modeStatus, { method: 'GET' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        renderRuntimeStatus(data);
+      }
+    } catch (_) {}
   }
 
   function showView(name) {
@@ -611,6 +712,10 @@
     sel && sel.addEventListener('change', onWorkModeSelectChange);
     const ms = $('modeSaveBtn');
     ms && ms.addEventListener('click', onModeSaveClick);
+    const ma = $('modeApplyBtn');
+    ma && ma.addEventListener('click', onModeApplyOnlyClick);
+    const mr = $('modeStatusRefreshBtn');
+    mr && mr.addEventListener('click', () => fetchModeRuntimeOnly());
   }
 
   function bindSta() {

@@ -70,8 +70,11 @@
               </select>
             </div>
             <div class="form-actions">
-              <button class="btn btn-primary" id="modeSaveBtn" type="button" disabled>保存模式到设备</button>
+              <button class="btn btn-primary" id="modeSaveBtn" type="button" disabled>保存并应用</button>
+              <button class="btn btn-secondary" id="modeApplyBtn" type="button" disabled>仅应用当前选择</button>
+              <button class="btn btn-secondary" id="modeStatusRefreshBtn" type="button">刷新应用状态</button>
             </div>
+            <p class="form-hint" id="modeRuntimeStatus" style="display:none;"></p>
             <p class="form-hint" id="modeSaveHint" style="display:none;"></p>
             <p class="form-hint mode-invalid-hint" id="modeInvalidHint" style="display:none;"></p>
           </div>
@@ -195,7 +198,7 @@
     </main>
 
     <footer class="footer">
-      <p>静态资源目录：<code>webPage/</code> · API：<code>/api/system/overview</code>、<code>/api/mode</code>、<code>/api/wifi*</code></p>
+      <p>静态资源目录：<code>webPage/</code> · API：<code>/api/system/overview</code>、<code>/api/mode</code>、<code>/api/mode/apply</code>、<code>/api/mode/status</code>、<code>/api/wifi*</code>、<code>/api/eth_wan*</code></p>
     </footer>
   </div>
 

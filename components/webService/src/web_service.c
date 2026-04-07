@@ -171,85 +171,28 @@ static bool hw_w5500(void)
     return system_w5500_detect_present();
 }
 
-static bool cap_softap(void)
-{
-    return true;
-}
-
-static bool cap_eth_lan(void)
-{
-    return hw_w5500();
-}
-
-static bool cap_sta_wan(void)
-{
-    return true;
-}
-
-static bool cap_modem_wan(void)
-{
-    return hw_usb_lte();
-}
-
-static bool cap_eth_wan_softap(void)
-{
-    return hw_w5500();
-}
-
-static bool work_mode_allowed(uint8_t id)
-{
-    switch (id) {
-    case 1:
-        return cap_modem_wan() && cap_softap();
-    case 2:
-        return cap_modem_wan() && cap_eth_lan();
-    case 3:
-        return cap_modem_wan() && cap_softap() && cap_eth_lan();
-    case 4:
-        return cap_sta_wan() && cap_softap();
-    case 5:
-        return cap_sta_wan() && cap_eth_lan();
-    case 6:
-        return cap_sta_wan() && cap_softap() && cap_eth_lan();
-    case 7:
-        return cap_eth_wan_softap();
-    default:
-        return false;
-    }
-}
-
-static void mode_push(cJSON *arr, uint8_t id, const char *label, bool needs_sta)
+static void mode_push(cJSON *arr, const system_mode_profile_t *p)
 {
     cJSON *o = cJSON_CreateObject();
-    cJSON_AddNumberToObject(o, "id", id);
-    cJSON_AddStringToObject(o, "label", label);
-    cJSON_AddBoolToObject(o, "needs_sta", needs_sta);
+    cJSON_AddNumberToObject(o, "id", p->id);
+    cJSON_AddStringToObject(o, "label", p->label);
+    cJSON_AddBoolToObject(o, "needs_sta", p->needs_sta);
+    cJSON_AddBoolToObject(o, "needs_eth_wan", p->needs_eth_wan_cfg);
+    cJSON_AddNumberToObject(o, "wan_type", (double)p->wan_type);
+    cJSON_AddBoolToObject(o, "lan_softap", p->lan_softap);
+    cJSON_AddBoolToObject(o, "lan_eth", p->lan_eth);
     cJSON_AddItemToArray(arr, o);
 }
 
 static cJSON *json_build_mode_list(void)
 {
     cJSON *arr = cJSON_CreateArray();
-    if (work_mode_allowed(1)) {
-        mode_push(arr, 1, "4G -> Wi-Fi (SoftAP)", false);
-    }
-    if (work_mode_allowed(2)) {
-        mode_push(arr, 2, "4G -> W5500 (ETH_LAN)", false);
-    }
-    if (work_mode_allowed(3)) {
-        mode_push(arr, 3, "4G -> Wi-Fi + W5500", false);
-    }
-    if (work_mode_allowed(4)) {
-        mode_push(arr, 4, "Wi-Fi STA -> SoftAP", true);
-    }
-    if (work_mode_allowed(5)) {
-        mode_push(arr, 5, "Wi-Fi STA -> W5500 (ETH_LAN)", true);
-    }
-    if (work_mode_allowed(6)) {
-        mode_push(arr, 6, "Wi-Fi STA -> Wi-Fi + W5500", true);
-    }
-    if (work_mode_allowed(7)) {
-        mode_push(arr, 7, "W5500 WAN -> SoftAP only", false);
+    size_t n = 0;
+    const system_mode_profile_t *profiles = system_mode_manager_get_profiles(&n);
+    for (size_t i = 0; i < n; i++) {
+        if (system_mode_manager_mode_allowed(profiles[i].id)) {
+            mode_push(arr, &profiles[i]);
+        }
     }
     return arr;
 }
@@ -706,10 +649,28 @@ static esp_err_t uri_system_overview_get(httpd_req_t *req)
     }
 
     uint8_t mode = 0;
-    if (load_work_mode_u8(&mode) == ESP_OK && mode <= 7) {
+    if (load_work_mode_u8(&mode) == ESP_OK && system_mode_manager_get_profile(mode)) {
         cJSON_AddNumberToObject(root, "saved_work_mode", mode);
+        const system_mode_profile_t *sp = system_mode_manager_get_profile(mode);
+        if (sp) {
+            cJSON_AddStringToObject(root, "saved_work_mode_label", sp->label);
+        }
     } else {
         cJSON_AddNullToObject(root, "saved_work_mode");
+    }
+
+    system_mode_status_t mst;
+    system_mode_manager_get_status(&mst);
+    cJSON *mstj = cJSON_CreateObject();
+    if (mstj) {
+        cJSON_AddNumberToObject(mstj, "current_mode", mst.current_mode);
+        cJSON_AddNumberToObject(mstj, "target_mode", mst.target_mode);
+        cJSON_AddNumberToObject(mstj, "last_ok_mode", mst.last_ok_mode);
+        cJSON_AddBoolToObject(mstj, "applying", mst.applying);
+        cJSON_AddBoolToObject(mstj, "rollback_last_apply", mst.rollback_last_apply);
+        cJSON_AddNumberToObject(mstj, "last_error", (double)mst.last_error);
+        cJSON_AddStringToObject(mstj, "phase", mst.phase);
+        cJSON_AddItemToObject(root, "mode_runtime", mstj);
     }
 
     char *out = cJSON_PrintUnformatted(root);
@@ -731,7 +692,7 @@ static esp_err_t uri_mode_get(httpd_req_t *req)
 
     uint8_t cur = 0;
     esp_err_t le = load_work_mode_u8(&cur);
-    if (le == ESP_OK && cur >= 1 && cur <= 7) {
+    if (le == ESP_OK && system_mode_manager_get_profile(cur)) {
         cJSON_AddNumberToObject(root, "current", cur);
     } else {
         cJSON_AddNumberToObject(root, "current", 0);
@@ -759,6 +720,20 @@ static esp_err_t uri_mode_get(httpd_req_t *req)
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"oom\"}");
     }
     cJSON_AddItemToObject(root, "modes", modes);
+
+    system_mode_status_t mst;
+    system_mode_manager_get_status(&mst);
+    cJSON *mstj = cJSON_CreateObject();
+    if (mstj) {
+        cJSON_AddNumberToObject(mstj, "current_mode", mst.current_mode);
+        cJSON_AddNumberToObject(mstj, "target_mode", mst.target_mode);
+        cJSON_AddNumberToObject(mstj, "last_ok_mode", mst.last_ok_mode);
+        cJSON_AddBoolToObject(mstj, "applying", mst.applying);
+        cJSON_AddBoolToObject(mstj, "rollback_last_apply", mst.rollback_last_apply);
+        cJSON_AddNumberToObject(mstj, "last_error", (double)mst.last_error);
+        cJSON_AddStringToObject(mstj, "phase", mst.phase);
+        cJSON_AddItemToObject(root, "runtime_status", mstj);
+    }
 
     char *out = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -788,14 +763,17 @@ static esp_err_t uri_mode_post(httpd_req_t *req)
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
     }
     cJSON *mid = cJSON_GetObjectItem(root, "mode");
-    if (!cJSON_IsNumber(mid) || mid->valuedouble < 1 || mid->valuedouble > 7) {
+    if (!cJSON_IsNumber(mid)) {
         cJSON_Delete(root);
-        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"mode 1..7 required\"}");
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"mode required\"}");
     }
     uint8_t m = (uint8_t)mid->valuedouble;
     cJSON_Delete(root);
 
-    if (!work_mode_allowed(m)) {
+    if (!system_mode_manager_get_profile(m)) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"unknown mode\"}");
+    }
+    if (!system_mode_manager_mode_allowed(m)) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"mode not allowed for this hardware\"}");
     }
 
@@ -811,6 +789,64 @@ static esp_err_t uri_mode_post(httpd_req_t *req)
         return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"Saved to NVS. Apply failed now; reboot will re-apply.\"}");
     }
     return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"Saved to NVS and applied at runtime.\"}");
+}
+
+static esp_err_t uri_mode_apply_post(httpd_req_t *req)
+{
+    char body[128] = {0};
+    uint8_t m = 0;
+    if (req->content_len > 0) {
+        int len = req->content_len;
+        if (len >= (int)sizeof(body)) {
+            return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
+        }
+        int r = httpd_req_recv(req, body, len);
+        if (r <= 0) {
+            return send_json(req, 400, "{\"status\":\"error\",\"message\":\"recv failed\"}");
+        }
+        body[r] = '\0';
+        cJSON *root = cJSON_Parse(body);
+        if (!root) {
+            return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
+        }
+        cJSON *mid = cJSON_GetObjectItem(root, "mode");
+        if (!cJSON_IsNumber(mid)) {
+            cJSON_Delete(root);
+            return send_json(req, 400, "{\"status\":\"error\",\"message\":\"mode required\"}");
+        }
+        m = (uint8_t)mid->valuedouble;
+        cJSON_Delete(root);
+    } else {
+        if (load_work_mode_u8(&m) != ESP_OK) {
+            return send_json(req, 400, "{\"status\":\"error\",\"message\":\"no saved mode\"}");
+        }
+    }
+
+    if (!system_mode_manager_get_profile(m)) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"unknown mode\"}");
+    }
+    esp_err_t e = system_mode_manager_apply(m);
+    if (e != ESP_OK) {
+        char out[160];
+        snprintf(out, sizeof(out), "{\"status\":\"error\",\"message\":\"apply failed: %s\"}", esp_err_to_name(e));
+        return send_json(req, 400, out);
+    }
+    return send_json(req, 200, "{\"status\":\"success\"}");
+}
+
+static esp_err_t uri_mode_status_get(httpd_req_t *req)
+{
+    system_mode_status_t st = {0};
+    system_mode_manager_get_status(&st);
+    char out[320];
+    snprintf(out, sizeof(out),
+             "{\"current_mode\":%u,\"target_mode\":%u,\"last_ok_mode\":%u,"
+             "\"applying\":%s,\"rollback_last_apply\":%s,\"last_error\":%d,\"phase\":\"%s\"}",
+             (unsigned)st.current_mode, (unsigned)st.target_mode, (unsigned)st.last_ok_mode,
+             st.applying ? "true" : "false",
+             st.rollback_last_apply ? "true" : "false",
+             (int)st.last_error, st.phase);
+    return send_json(req, 200, out);
 }
 
 static esp_err_t register_handlers(httpd_handle_t server)
@@ -891,6 +927,20 @@ static esp_err_t register_handlers(httpd_handle_t server)
         .handler = uri_mode_post,
     };
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &mode_post), TAG, "register mode post failed");
+
+    httpd_uri_t mode_apply = {
+        .uri = "/api/mode/apply",
+        .method = HTTP_POST,
+        .handler = uri_mode_apply_post,
+    };
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &mode_apply), TAG, "register mode apply failed");
+
+    httpd_uri_t mode_status = {
+        .uri = "/api/mode/status",
+        .method = HTTP_GET,
+        .handler = uri_mode_status_get,
+    };
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &mode_status), TAG, "register mode status failed");
 
     httpd_uri_t static_get = {
         .uri = "/*",

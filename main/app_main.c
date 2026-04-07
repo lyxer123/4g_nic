@@ -15,9 +15,7 @@
 #include "system_mode_manager.h"
 #include "system_wifi_dual_connect.h"
 #include "system_sta_baidu_probe.h"
-#if CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET
 #include "system_eth_uplink_debug.h"
-#endif
 
 static esp_err_t esp_storage_init(void)
 {
@@ -46,11 +44,7 @@ void app_main(void)
     esp_bridge_create_all_netif();
     (void)system_mode_manager_apply_saved();
     system_wifi_dual_connect_init();
-#if CONFIG_BRIDGE_EXTERNAL_NETIF_STATION
     system_sta_baidu_probe_init();
-#endif
-#if CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET
     system_eth_uplink_debug_init();
-#endif
     ESP_ERROR_CHECK(web_service_start());
 }

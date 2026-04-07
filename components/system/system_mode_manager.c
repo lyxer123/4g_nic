@@ -2,9 +2,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <stdio.h>
 #include <string.h>
 
-#include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
@@ -12,6 +12,8 @@
 #include "nvs.h"
 
 #include "system_mode_manager.h"
+#include "system_usb_cat1_detect.h"
+#include "system_w5500_detect.h"
 
 #define NVS_NS_UI      "bridge_ui"
 #define NVS_KEY_MODE   "work_mode"
@@ -38,7 +40,28 @@ typedef struct {
 } eth_wan_cfg_t;
 
 static const char *TAG = "mode_mgr";
-static uint8_t s_current_mode = 0;
+
+static const system_mode_profile_t s_profiles[] = {
+    {1, "4G -> Wi-Fi (SoftAP)", SYSTEM_WAN_USB_MODEM, true, false, false, false},
+    {2, "4G -> W5500 (ETH_LAN)", SYSTEM_WAN_USB_MODEM, false, true, false, false},
+    {3, "4G -> Wi-Fi + W5500", SYSTEM_WAN_USB_MODEM, true, true, false, false},
+    {4, "Wi-Fi STA -> SoftAP", SYSTEM_WAN_WIFI_STA, true, false, true, false},
+    {5, "Wi-Fi STA -> W5500 (ETH_LAN)", SYSTEM_WAN_WIFI_STA, false, true, true, false},
+    {6, "Wi-Fi STA -> Wi-Fi + W5500", SYSTEM_WAN_WIFI_STA, true, true, true, false},
+    {7, "W5500 WAN -> SoftAP", SYSTEM_WAN_W5500, true, false, false, true},
+    {8, "W5500 WAN -> W5500 (ETH_LAN)", SYSTEM_WAN_W5500, false, true, false, true},
+    {9, "W5500 WAN -> Wi-Fi + W5500", SYSTEM_WAN_W5500, true, true, false, true},
+};
+
+static system_mode_status_t s_status = {
+    .current_mode = 0,
+    .target_mode = 0,
+    .last_ok_mode = 0,
+    .last_error = ESP_OK,
+    .applying = false,
+    .rollback_last_apply = false,
+    .phase = "idle",
+};
 
 static esp_err_t load_work_mode(uint8_t *out)
 {
@@ -48,16 +71,6 @@ static esp_err_t load_work_mode(uint8_t *out)
     e = nvs_get_u8(h, NVS_KEY_MODE, out);
     nvs_close(h);
     return e;
-}
-
-static bool mode_needs_sta(uint8_t mode)
-{
-    return mode == 4 || mode == 5 || mode == 6;
-}
-
-static bool mode_needs_eth_wan_cfg(uint8_t mode)
-{
-    return mode == 7;
 }
 
 static esp_err_t load_sta_cfg(char *ssid, size_t ssid_len, char *pwd, size_t pwd_len)
@@ -104,26 +117,29 @@ static esp_err_t load_eth_wan_cfg(eth_wan_cfg_t *cfg)
     return ESP_OK;
 }
 
-static void apply_sta_if_needed(bool needed)
+static esp_err_t apply_sta_if_needed(bool needed)
 {
     if (!needed) {
-        esp_wifi_disconnect();
-        return;
+        (void)esp_wifi_disconnect();
+        return ESP_OK;
     }
 
     char ssid[33] = {0};
     char pwd[65] = {0};
     if (load_sta_cfg(ssid, sizeof(ssid), pwd, sizeof(pwd)) != ESP_OK || ssid[0] == '\0') {
         ESP_LOGW(TAG, "STA mode requested but no saved STA credentials");
-        return;
+        return ESP_ERR_NOT_FOUND;
     }
 
     wifi_mode_t mode = WIFI_MODE_NULL;
     if (esp_wifi_get_mode(&mode) == ESP_OK && mode != WIFI_MODE_APSTA && mode != WIFI_MODE_STA) {
-        esp_wifi_set_mode(WIFI_MODE_APSTA);
+        esp_err_t e = esp_wifi_set_mode(WIFI_MODE_APSTA);
+        if (e != ESP_OK) return e;
     }
     if (esp_netif_get_handle_from_ifkey("WIFI_STA_DEF") == NULL) {
-        esp_netif_create_default_wifi_sta();
+        if (!esp_netif_create_default_wifi_sta()) {
+            return ESP_FAIL;
+        }
     }
     wifi_config_t cfg = {0};
     size_t ssid_len = strnlen(ssid, sizeof(cfg.sta.ssid) - 1);
@@ -133,9 +149,14 @@ static void apply_sta_if_needed(bool needed)
     memcpy(cfg.sta.password, pwd, pwd_len);
     cfg.sta.password[pwd_len] = '\0';
     cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-    esp_wifi_set_config(WIFI_IF_STA, &cfg);
-    esp_err_t e = esp_wifi_connect();
+    esp_err_t e = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    if (e != ESP_OK) return e;
+    e = esp_wifi_connect();
     ESP_LOGI(TAG, "apply STA connect: %s", esp_err_to_name(e));
+    if (e == ESP_OK || e == ESP_ERR_WIFI_CONN) {
+        return ESP_OK;
+    }
+    return e;
 }
 
 static bool str_to_ip4(const char *s, esp_ip4_addr_t *out)
@@ -147,62 +168,132 @@ static bool str_to_ip4(const char *s, esp_ip4_addr_t *out)
     return true;
 }
 
-static void apply_eth_wan_if_needed(bool needed)
+static esp_err_t apply_eth_wan_if_needed(bool needed)
 {
     esp_netif_t *eth_wan = esp_netif_get_handle_from_ifkey("ETH_WAN");
-    if (!eth_wan) return;
+    if (!eth_wan) return ESP_OK;
     if (!needed) {
-        esp_netif_dhcpc_start(eth_wan);
-        return;
+        return esp_netif_dhcpc_start(eth_wan);
     }
 
     eth_wan_cfg_t cfg;
     load_eth_wan_cfg(&cfg);
     if (cfg.dhcp) {
-        esp_netif_dhcpc_start(eth_wan);
+        esp_err_t e = esp_netif_dhcpc_start(eth_wan);
         ESP_LOGI(TAG, "ETH_WAN use DHCP (from mode)");
-        return;
+        return e;
     }
 
     esp_ip4_addr_t ip = {0}, gw = {0}, nm = {0};
     if (!str_to_ip4(cfg.ip, &ip) || !str_to_ip4(cfg.gw, &gw) || !str_to_ip4(cfg.mask, &nm)) {
         ESP_LOGW(TAG, "ETH_WAN static cfg missing or invalid, fallback DHCP");
-        esp_netif_dhcpc_start(eth_wan);
-        return;
+        return esp_netif_dhcpc_start(eth_wan);
     }
 
-    esp_netif_dhcpc_stop(eth_wan);
+    esp_err_t e = esp_netif_dhcpc_stop(eth_wan);
+    if (e != ESP_OK) return e;
     esp_netif_ip_info_t info = {0};
     info.ip = ip;
     info.gw = gw;
     info.netmask = nm;
-    esp_err_t e = esp_netif_set_ip_info(eth_wan, &info);
+    e = esp_netif_set_ip_info(eth_wan, &info);
     if (e != ESP_OK) {
         ESP_LOGW(TAG, "set ETH_WAN static IP failed: %s", esp_err_to_name(e));
-        return;
+        return e;
     }
 
     esp_netif_dns_info_t dns = {0};
     if (str_to_ip4(cfg.dns1, &dns.ip.u_addr.ip4)) {
         dns.ip.type = ESP_IPADDR_TYPE_V4;
-        esp_netif_set_dns_info(eth_wan, ESP_NETIF_DNS_MAIN, &dns);
+        (void)esp_netif_set_dns_info(eth_wan, ESP_NETIF_DNS_MAIN, &dns);
     }
     if (str_to_ip4(cfg.dns2, &dns.ip.u_addr.ip4)) {
         dns.ip.type = ESP_IPADDR_TYPE_V4;
-        esp_netif_set_dns_info(eth_wan, ESP_NETIF_DNS_BACKUP, &dns);
+        (void)esp_netif_set_dns_info(eth_wan, ESP_NETIF_DNS_BACKUP, &dns);
     }
     ESP_LOGI(TAG, "ETH_WAN static config applied from NVS");
+    return ESP_OK;
+}
+
+const system_mode_profile_t *system_mode_manager_get_profiles(size_t *out_count)
+{
+    if (out_count) {
+        *out_count = sizeof(s_profiles) / sizeof(s_profiles[0]);
+    }
+    return s_profiles;
+}
+
+const system_mode_profile_t *system_mode_manager_get_profile(uint8_t mode)
+{
+    for (size_t i = 0; i < sizeof(s_profiles) / sizeof(s_profiles[0]); i++) {
+        if (s_profiles[i].id == mode) {
+            return &s_profiles[i];
+        }
+    }
+    return NULL;
+}
+
+bool system_mode_manager_mode_allowed(uint8_t mode)
+{
+    const system_mode_profile_t *p = system_mode_manager_get_profile(mode);
+    if (!p) return false;
+
+    if ((p->wan_type == SYSTEM_WAN_USB_MODEM) && !system_usb_cat1_detect_present()) {
+        return false;
+    }
+    if ((p->wan_type == SYSTEM_WAN_W5500 || p->lan_eth) && !system_w5500_detect_present()) {
+        return false;
+    }
+    return true;
+}
+
+void system_mode_manager_get_status(system_mode_status_t *out)
+{
+    if (!out) return;
+    *out = s_status;
 }
 
 esp_err_t system_mode_manager_apply(uint8_t mode)
 {
-    if (mode < 1 || mode > 7) {
+    const system_mode_profile_t *target = system_mode_manager_get_profile(mode);
+    if (!target) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (!system_mode_manager_mode_allowed(mode)) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
-    apply_sta_if_needed(mode_needs_sta(mode));
-    apply_eth_wan_if_needed(mode_needs_eth_wan_cfg(mode));
-    s_current_mode = mode;
+    const system_mode_profile_t *prev = system_mode_manager_get_profile(s_status.current_mode);
+    s_status.applying = true;
+    s_status.rollback_last_apply = false;
+    s_status.target_mode = mode;
+    s_status.last_error = ESP_OK;
+    snprintf(s_status.phase, sizeof(s_status.phase), "apply");
+
+    esp_err_t e = apply_sta_if_needed(target->needs_sta);
+    if (e == ESP_OK) {
+        e = apply_eth_wan_if_needed(target->needs_eth_wan_cfg);
+    }
+
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "mode %u apply failed: %s, rollback to %u", (unsigned)mode, esp_err_to_name(e), (unsigned)s_status.current_mode);
+        s_status.rollback_last_apply = true;
+        snprintf(s_status.phase, sizeof(s_status.phase), "rollback");
+        if (prev) {
+            (void)apply_sta_if_needed(prev->needs_sta);
+            (void)apply_eth_wan_if_needed(prev->needs_eth_wan_cfg);
+        }
+        s_status.last_error = e;
+        s_status.applying = false;
+        snprintf(s_status.phase, sizeof(s_status.phase), "idle");
+        return e;
+    }
+
+    s_status.current_mode = mode;
+    s_status.last_ok_mode = mode;
+    s_status.last_error = ESP_OK;
+    s_status.applying = false;
+    snprintf(s_status.phase, sizeof(s_status.phase), "idle");
     ESP_LOGI(TAG, "runtime mode applied: %u", (unsigned)mode);
     return ESP_OK;
 }
@@ -211,15 +302,19 @@ esp_err_t system_mode_manager_apply_saved(void)
 {
     uint8_t mode = 0;
     esp_err_t e = load_work_mode(&mode);
-    if (e != ESP_OK || mode < 1 || mode > 7) {
+    if (e != ESP_OK) {
         ESP_LOGW(TAG, "no valid saved mode in NVS");
-        return e == ESP_OK ? ESP_ERR_NOT_FOUND : e;
+        return e;
+    }
+    if (!system_mode_manager_get_profile(mode)) {
+        ESP_LOGW(TAG, "saved mode invalid: %u", (unsigned)mode);
+        return ESP_ERR_INVALID_ARG;
     }
     return system_mode_manager_apply(mode);
 }
 
 uint8_t system_mode_manager_current(void)
 {
-    return s_current_mode;
+    return s_status.current_mode;
 }
 
