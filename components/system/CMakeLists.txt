@@ -7,7 +7,8 @@ idf_component_register(
         "system_usb_cat1_detect.c"
         "system_hw_presence.c"
         "system_napt_compat.c"
+        "system_mode_manager.c"
     INCLUDE_DIRS "include"
-    REQUIRES esp_netif esp_event esp_wifi lwip esp_eth esp_timer esp_http_client driver usb
+    REQUIRES esp_netif esp_event esp_wifi lwip esp_eth esp_timer esp_http_client driver usb nvs_flash
 )
 

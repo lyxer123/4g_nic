@@ -17,6 +17,7 @@
 #include "esp_system.h"
 #include "system_w5500_detect.h"
 #include "system_usb_cat1_detect.h"
+#include "system_mode_manager.h"
 #include "web_service.h"
 
 static const char *TAG = "web_service";
@@ -803,7 +804,13 @@ static esp_err_t uri_mode_post(httpd_req_t *req)
         ESP_LOGE(TAG, "save work_mode: %s", esp_err_to_name(ret));
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"nvs save failed\"}");
     }
-    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"Saved to NVS. Parameters are persistent across reboot.\"}");
+
+    ret = system_mode_manager_apply(m);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "mode saved but apply failed: %s", esp_err_to_name(ret));
+        return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"Saved to NVS. Apply failed now; reboot will re-apply.\"}");
+    }
+    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"Saved to NVS and applied at runtime.\"}");
 }
 
 static esp_err_t register_handlers(httpd_handle_t server)
