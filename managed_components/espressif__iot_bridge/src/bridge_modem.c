@@ -117,7 +117,7 @@ esp_netif_t *esp_bridge_create_modem_netif(esp_netif_ip_info_t *custom_ip_info, 
     };
     gpio_config(&io_config);
     gpio_set_level(CONFIG_MODEM_RESET_GPIO, 0);
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(1500));
     gpio_set_level(CONFIG_MODEM_RESET_GPIO, 1);
 
     vTaskDelay(pdMS_TO_TICKS(MODULE_BOOT_TIME_MS));
@@ -180,7 +180,7 @@ esp_netif_t *esp_bridge_create_modem_netif(esp_netif_ip_info_t *custom_ip_info, 
     esp_modem_dce_t *dce = esp_modem_new_dev_usb(ESP_MODEM_DCE_BG96, &dte_usb_config, &dce_config, esp_netif);
     assert(dce);
     esp_modem_set_error_cb(dce, usb_terminal_error_handler);
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Although the DTE should be ready after USB enumeration, sometimes it fails to respond without this delay
+    vTaskDelay(pdMS_TO_TICKS(2000)); // Although the DTE should be ready after USB enumeration, sometimes it fails to respond without this delay
 
 #else
 #error Invalid serial connection to modem.
