@@ -51,6 +51,8 @@ static const system_mode_profile_t s_profiles[] = {
     {7, "W5500 WAN -> SoftAP", SYSTEM_WAN_W5500, true, false, false, true},
     {8, "W5500 WAN -> W5500 (ETH_LAN)", SYSTEM_WAN_W5500, false, true, false, true},
     {9, "W5500 WAN -> Wi-Fi + W5500", SYSTEM_WAN_W5500, true, true, false, true},
+    {10, "SoftAP + W5500 LAN (no USB WAN)", SYSTEM_WAN_NONE, true, true, false, false},
+    {11, "SoftAP only (provisioning)", SYSTEM_WAN_NONE, true, false, false, false},
 };
 
 static system_mode_status_t s_status = {
@@ -136,7 +138,7 @@ static esp_err_t apply_sta_if_needed(bool needed)
         esp_err_t e = esp_wifi_set_mode(WIFI_MODE_APSTA);
         if (e != ESP_OK) return e;
     }
-    if (esp_netif_get_handle_from_ifkey("WIFI_STA_DEF") == NULL) {
+    if (!esp_netif_get_handle_from_ifkey("WIFI_STA_DEF")) {
         if (!esp_netif_create_default_wifi_sta()) {
             return ESP_FAIL;
         }
@@ -148,7 +150,7 @@ static esp_err_t apply_sta_if_needed(bool needed)
     size_t pwd_len = strnlen(pwd, sizeof(cfg.sta.password) - 1);
     memcpy(cfg.sta.password, pwd, pwd_len);
     cfg.sta.password[pwd_len] = '\0';
-    cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_WPA3_PSK;
     esp_err_t e = esp_wifi_set_config(WIFI_IF_STA, &cfg);
     if (e != ESP_OK) return e;
     e = esp_wifi_connect();
@@ -173,7 +175,8 @@ static esp_err_t apply_eth_wan_if_needed(bool needed)
     esp_netif_t *eth_wan = esp_netif_get_handle_from_ifkey("ETH_WAN");
     if (!eth_wan) return ESP_OK;
     if (!needed) {
-        return esp_netif_dhcpc_start(eth_wan);
+        /* Modes without W5500-WAN NVS profile must not touch ETH_WAN (avoids spurious dhcpc). */
+        return ESP_OK;
     }
 
     eth_wan_cfg_t cfg;
@@ -238,10 +241,23 @@ bool system_mode_manager_mode_allowed(uint8_t mode)
     const system_mode_profile_t *p = system_mode_manager_get_profile(mode);
     if (!p) return false;
 
-    if ((p->wan_type == SYSTEM_WAN_USB_MODEM) && !system_usb_cat1_detect_present()) {
+#if !CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM
+    if (p->wan_type == SYSTEM_WAN_USB_MODEM) {
         return false;
     }
+#endif
+
+#if defined(CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET) || defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
     if ((p->wan_type == SYSTEM_WAN_W5500 || p->lan_eth) && !system_w5500_detect_present()) {
+        return false;
+    }
+#else
+    if (p->wan_type == SYSTEM_WAN_W5500 || p->lan_eth) {
+        return false;
+    }
+#endif
+
+    if (p->wan_type == SYSTEM_WAN_USB_MODEM && !system_usb_cat1_detect_present()) {
         return false;
     }
     return true;
@@ -310,6 +326,49 @@ esp_err_t system_mode_manager_apply_saved(void)
         ESP_LOGW(TAG, "saved mode invalid: %u", (unsigned)mode);
         return ESP_ERR_INVALID_ARG;
     }
+    return system_mode_manager_apply(mode);
+}
+
+uint8_t system_mode_manager_pick_hw_default_mode(void)
+{
+    const bool usb = system_usb_cat1_detect_present();
+    const bool w5500 = system_w5500_detect_present();
+
+#if CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM
+    const bool want_usb_wan = true;
+#else
+    const bool want_usb_wan = false;
+#endif
+#if defined(CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET) || defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
+    const bool want_eth = true;
+#else
+    const bool want_eth = false;
+#endif
+
+    if (want_usb_wan && usb && want_eth && w5500) {
+        return 3U;
+    }
+    if (want_usb_wan && usb) {
+        return 1U;
+    }
+    if (want_eth && w5500) {
+        return 10U;
+    }
+    return 11U;
+}
+
+esp_err_t system_mode_manager_apply_saved_or_hw_default(void)
+{
+    uint8_t mode = 0;
+    esp_err_t e = load_work_mode(&mode);
+    if (e == ESP_OK && system_mode_manager_get_profile(mode) && system_mode_manager_mode_allowed(mode)) {
+        return system_mode_manager_apply(mode);
+    }
+    if (e == ESP_OK && system_mode_manager_get_profile(mode)) {
+        ESP_LOGW(TAG, "saved mode %u not allowed for hardware/build, using default", (unsigned)mode);
+    }
+    mode = system_mode_manager_pick_hw_default_mode();
+    ESP_LOGI(TAG, "HW default work mode: %u", (unsigned)mode);
     return system_mode_manager_apply(mode);
 }
 

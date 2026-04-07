@@ -16,7 +16,7 @@ extern "C" {
 /**
  * @brief Run SPI probe: init bus, optional PHY RST, read chip version byte (expect 0x04).
  *
- * Must run before esp_bridge_create_all_netif() so SPI bus is free. Safe to call when
+ * Must run before system_bridge_init_netifs_from_hw() / esp_bridge_create_all_netif() so SPI bus is free. Safe to call when
  * CONFIG_ETH_SPI_ETHERNET_W5500 is disabled (returns ESP_ERR_NOT_SUPPORTED).
  */
 esp_err_t system_w5500_detect_run(void);

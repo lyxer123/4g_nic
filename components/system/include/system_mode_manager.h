@@ -13,6 +13,7 @@ extern "C" {
 #endif
 
 typedef enum {
+    SYSTEM_WAN_NONE = 0,
     SYSTEM_WAN_USB_MODEM = 1,
     SYSTEM_WAN_WIFI_STA = 2,
     SYSTEM_WAN_W5500 = 3,
@@ -40,6 +41,10 @@ typedef struct {
 
 esp_err_t system_mode_manager_apply(uint8_t mode);
 esp_err_t system_mode_manager_apply_saved(void);
+/** Prefer saved NVS mode when allowed; else pick mode from HW (USB / W5500) probes + build flags. */
+esp_err_t system_mode_manager_apply_saved_or_hw_default(void);
+/** Best-effort default mode id for current hardware (see profiles in system_mode_manager.c). */
+uint8_t system_mode_manager_pick_hw_default_mode(void);
 uint8_t system_mode_manager_current(void);
 const system_mode_profile_t *system_mode_manager_get_profiles(size_t *out_count);
 const system_mode_profile_t *system_mode_manager_get_profile(uint8_t mode);

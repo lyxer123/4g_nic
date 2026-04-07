@@ -9,10 +9,10 @@
 #include "esp_netif.h"
 #include "esp_event.h"
 
-#include "esp_bridge.h"
 #include "web_service.h"
 #include "system_hw_presence.h"
 #include "system_mode_manager.h"
+#include "system_bridge_runtime.h"
 #include "system_wifi_dual_connect.h"
 #include "system_sta_baidu_probe.h"
 #include "system_eth_uplink_debug.h"
@@ -41,8 +41,8 @@ void app_main(void)
 
     system_hw_presence_probe_before_bridge();
 
-    esp_bridge_create_all_netif();
-    (void)system_mode_manager_apply_saved();
+    system_bridge_init_netifs_from_hw();
+    (void)system_mode_manager_apply_saved_or_hw_default();
     system_wifi_dual_connect_init();
     system_sta_baidu_probe_init();
     system_eth_uplink_debug_init();

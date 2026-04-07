@@ -309,14 +309,17 @@ static esp_err_t apply_sta_config(const char *ssid, const char *password)
         ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_APSTA), TAG, "set APSTA failed");
     }
 
-    if (esp_netif_get_handle_from_ifkey("WIFI_STA_DEF") == NULL) {
-        esp_netif_create_default_wifi_sta();
+    if (!esp_netif_get_handle_from_ifkey("WIFI_STA_DEF")) {
+        if (!esp_netif_create_default_wifi_sta()) {
+            return ESP_ERR_NO_MEM;
+        }
     }
 
     wifi_config_t cfg = {0};
     strlcpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid));
     strlcpy((char *)cfg.sta.password, password, sizeof(cfg.sta.password));
-    cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    /* Honor WPA2/3 transition APs (log may show WPA3-SAE while threshold was WPA2-only). */
+    cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_WPA3_PSK;
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &cfg), TAG, "set sta config failed");
     return esp_wifi_connect();
@@ -428,9 +431,13 @@ static esp_err_t uri_wifi_clear_post(httpd_req_t *req)
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"clear failed\"}");
     }
 
-    /* Stop current STA connection attempts (NVS cleared, so after reset it won't auto-connect). */
+    /* Stop station; keep WIFI_STA_DEF when IoT-Bridge created it at boot (destroy breaks
+     * bridge netif list + duplicate handlers if user reconnects later). */
     esp_wifi_disconnect();
-    esp_wifi_set_mode(WIFI_MODE_AP);
+    esp_err_t werr = esp_wifi_set_mode(WIFI_MODE_AP);
+    if (werr != ESP_OK) {
+        ESP_LOGW(TAG, "wifi_set_mode(AP) after clear: %s", esp_err_to_name(werr));
+    }
 
     return send_json(req, 200, "{\"status\":\"success\"}");
 }
@@ -457,8 +464,10 @@ static esp_err_t uri_wifi_scan_get(httpd_req_t *req)
             return send_json(req, 400, "{\"status\":\"error\",\"message\":\"scan start failed\"}");
         }
     }
-    if (esp_netif_get_handle_from_ifkey("WIFI_STA_DEF") == NULL) {
-        esp_netif_create_default_wifi_sta();
+    if (!esp_netif_get_handle_from_ifkey("WIFI_STA_DEF")) {
+        if (!esp_netif_create_default_wifi_sta()) {
+            return send_json(req, 400, "{\"status\":\"error\",\"message\":\"sta netif create failed\"}");
+        }
     }
 
     wifi_scan_config_t scan_cfg = {0};
