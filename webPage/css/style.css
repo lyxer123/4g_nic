@@ -459,6 +459,37 @@ body.sidebar-open .sidebar {
   gap: 1rem;
 }
 
+.grid-2.single-wide > .card:not(.hidden) {
+  grid-column: 1 / -1;
+}
+
+.sys-time-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+}
+
+.sys-time-row {
+  display: flex;
+  gap: 0.65rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.sys-time-row .input {
+  flex: 1;
+  min-width: 230px;
+}
+
+.sys-time-note {
+  margin-top: 0.25rem;
+  font-size: 0.82rem;
+}
+
+.sys-time-save {
+  min-width: 120px;
+}
+
 /* —— 宽屏：与 PC 一致的固定侧栏 —— */
 @media (min-width: 900px) {
   .sidebar-backdrop {
@@ -564,6 +595,11 @@ body.sidebar-open .sidebar {
 
   .grid-2 {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .sys-time-grid {
+    grid-template-columns: minmax(360px, 1.2fr) minmax(320px, 1fr);
+    align-items: start;
   }
 }
 
@@ -752,6 +788,12 @@ body.sidebar-open .sidebar {
   flex-wrap: wrap;
   gap: 0.5rem;
   margin-top: 0.5rem;
+}
+
+.section-divider {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 0.65rem 0;
 }
 
 .table-wrap {

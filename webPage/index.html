@@ -34,12 +34,6 @@
           </div>
         </div>
         <div class="nav-group">
-          <button type="button" class="nav-group-title" data-toggle="g-wifi">WiFi设置</button>
-          <div class="nav-group-items" id="g-wifi">
-            <button type="button" class="nav-item" data-page="wifi">WiFi设置</button>
-          </div>
-        </div>
-        <div class="nav-group">
           <button type="button" class="nav-group-title" data-toggle="g-sys">系统管理</button>
           <div class="nav-group-items" id="g-sys">
             <button type="button" class="nav-item" data-page="password">管理密码</button>
@@ -136,27 +130,76 @@
               </div>
             </div>
           </div>
-          <div class="card hidden" id="ethWanPanel">
-            <div class="card-header">有线外网 W5500（ETH_WAN）</div>
-            <div class="card-body form-stack">
-              <p class="muted" style="margin: 0 0 10px; font-size: 13px; line-height: 1.45">
-                当前模式为「W5500 作 WAN」时，RJ45 接上联路由器/光猫；此处配置本口 IP。改完后可点「保存」或仅用下方按钮提交。
-              </p>
-              <div class="form-group switch-row">
-                <label>DHCP 自动获取</label>
-                <label class="switch"><input type="checkbox" id="ethWanDhcp" checked /><span class="slider"></span></label>
+          <div class="grid-2" id="networkCardsGrid">
+            <div class="card hidden" id="ethWanPanel">
+              <div class="card-header">有线外网 W5500（ETH_WAN）</div>
+              <div class="card-body form-stack">
+                <p class="muted" style="margin: 0 0 10px; font-size: 13px; line-height: 1.45">
+                  当前模式为「W5500 作 WAN」时，RJ45 接上联路由器/光猫；此处配置本口 IP。改完后可点「保存」或仅用下方按钮提交。
+                </p>
+                <div class="form-group switch-row">
+                  <label>DHCP 自动获取</label>
+                  <label class="switch"><input type="checkbox" id="ethWanDhcp" checked /><span class="slider"></span></label>
+                </div>
+                <div class="form-group"><label>IP</label><input class="input" id="ethWanIp" type="text" placeholder="留空或静态" /></div>
+                <div class="form-group"><label>掩码</label><input class="input" id="ethWanMask" type="text" /></div>
+                <div class="form-group"><label>网关</label><input class="input" id="ethWanGw" type="text" /></div>
+                <div class="form-group"><label>DNS1</label><input class="input" id="ethWanDns1" type="text" /></div>
+                <div class="form-group"><label>DNS2</label><input class="input" id="ethWanDns2" type="text" /></div>
+                <button type="button" class="btn btn-secondary" id="btnSaveEthWan">仅保存有线 WAN 参数并应用</button>
               </div>
-              <div class="form-group"><label>IP</label><input class="input" id="ethWanIp" type="text" placeholder="留空或静态" /></div>
-              <div class="form-group"><label>掩码</label><input class="input" id="ethWanMask" type="text" /></div>
-              <div class="form-group"><label>网关</label><input class="input" id="ethWanGw" type="text" /></div>
-              <div class="form-group"><label>DNS1</label><input class="input" id="ethWanDns1" type="text" /></div>
-              <div class="form-group"><label>DNS2</label><input class="input" id="ethWanDns2" type="text" /></div>
-              <button type="button" class="btn btn-secondary" id="btnSaveEthWan">仅保存有线 WAN 参数并应用</button>
             </div>
-          </div>
-          <div class="grid-2">
-            <div class="card">
-              <div class="card-header">LAN</div>
+            <div class="card hidden" id="wirelessComboCard">
+              <div class="card-header">无线配置</div>
+              <div class="card-body form-stack">
+                <div id="staSection" class="hidden">
+                  <div class="form-group">
+                    <label>Wi-Fi STA（连接上级路由）</label>
+                    <div class="inline-row">
+                      <input class="input" id="staSsid" type="text" />
+                      <button type="button" class="btn btn-secondary" id="btnScanSta">扫描</button>
+                    </div>
+                    <ul class="ssid-pop" id="ssidPop" hidden></ul>
+                  </div>
+                  <div class="form-group">
+                    <label>密码</label>
+                    <input class="input" id="staPwd" type="password" />
+                  </div>
+                  <div class="form-actions">
+                    <button type="button" class="btn btn-primary" id="btnSaveSta">保存 STA</button>
+                    <button type="button" class="btn btn-secondary" id="btnLoadSta">读取</button>
+                    <button type="button" class="btn btn-danger" id="btnClearSta">清空STA</button>
+                  </div>
+                </div>
+
+                <hr class="section-divider hidden" id="wirelessSectionDivider" />
+
+                <div id="wifiLanSection" class="hidden">
+                  <div class="form-group">
+                    <label>WiFi LAN（热点）</label>
+                    <input class="input" id="lanApSsid" />
+                  </div>
+                  <div class="form-group">
+                    <label>加密方式</label>
+                    <select class="input" id="lanApEnc">
+                      <option>WPA2-PSK</option>
+                      <option>WPA-PSK</option>
+                      <option>OPEN</option>
+                    </select>
+                  </div>
+                  <div class="form-group">
+                    <label>WiFi密码</label>
+                    <input class="input" id="lanApPwd" type="password" />
+                  </div>
+                  <div class="form-group switch-row">
+                    <label>隐藏WiFi</label>
+                    <label class="switch"><input type="checkbox" id="lanApHidden" /><span class="slider"></span></label>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="card" id="lanEthCard">
+              <div class="card-header">W5500 LAN</div>
               <div class="card-body form-stack">
                 <div class="form-group"><label>IP地址</label><input class="input" id="lanIp" type="text" /></div>
                 <div class="form-group"><label>子网掩码</label><input class="input" id="lanMask" type="text" /></div>
@@ -169,47 +212,6 @@
                 <div class="form-group"><label>租用时间（小时）</label><input class="input" id="lanLease" type="number" min="1" /></div>
                 <div class="form-group"><label>DNS1</label><input class="input" id="lanDns1" type="text" /></div>
                 <div class="form-group"><label>DNS2</label><input class="input" id="lanDns2" type="text" /></div>
-              </div>
-            </div>
-            <div class="card">
-              <div class="card-header">WAN / 4G</div>
-              <div class="card-body form-stack">
-                <div class="form-group switch-row">
-                  <label>4G模式</label>
-                  <label class="switch"><input type="checkbox" id="wan4g" /><span class="slider"></span></label>
-                </div>
-                <div class="form-group">
-                  <label>网络模式</label>
-                  <select class="input" id="wanNetMode">
-                    <option value="auto">4G/3G/2G自动选择</option>
-                    <option value="4g_only">仅4G</option>
-                    <option value="3g">3G</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="card hidden" id="staAdvanced">
-            <div class="card-header">Wi-Fi STA（连接上级路由）</div>
-            <div class="card-body form-stack">
-              <div class="form-row">
-                <div class="form-group flex-1">
-                  <label>SSID</label>
-                  <div class="inline-row">
-                    <input class="input" id="staSsid" type="text" />
-                    <button type="button" class="btn btn-secondary" id="btnScanSta">扫描</button>
-                  </div>
-                  <ul class="ssid-pop" id="ssidPop" hidden></ul>
-                </div>
-                <div class="form-group flex-1">
-                  <label>密码</label>
-                  <input class="input" id="staPwd" type="password" />
-                </div>
-              </div>
-              <div class="form-actions">
-                <button type="button" class="btn btn-primary" id="btnSaveSta">保存 STA</button>
-                <button type="button" class="btn btn-secondary" id="btnLoadSta">读取</button>
-                <button type="button" class="btn btn-danger" id="btnClearSta">清空STA</button>
               </div>
             </div>
           </div>
@@ -230,46 +232,6 @@
           </div>
         </section>
 
-        <!-- WiFi AP -->
-        <section class="page hidden" id="page-wifi" data-title="WiFi设置">
-          <div class="card">
-            <div class="card-header">WIFI配置</div>
-            <div class="card-body form-stack">
-              <div class="form-group switch-row">
-                <label>WiFi</label>
-                <label class="switch"><input type="checkbox" id="wifiEn" checked /><span class="slider"></span></label>
-              </div>
-              <div class="form-group"><label>WiFi名称</label><input class="input" id="apSsid" /></div>
-              <div class="form-group">
-                <label>加密方式</label>
-                <select class="input" id="apEnc">
-                  <option>WPA2-PSK</option>
-                  <option>WPA-PSK</option>
-                  <option>OPEN</option>
-                </select>
-              </div>
-              <div class="form-group"><label>WiFi密码</label><input class="input" id="apPwd" type="password" /></div>
-              <div class="form-group switch-row">
-                <label>隐藏WiFi</label>
-                <label class="switch"><input type="checkbox" id="apHidden" /><span class="slider"></span></label>
-              </div>
-              <div class="form-group"><label>无线协议</label><select class="input" id="apProto"><option>auto</option><option>802.11n</option><option>802.11g</option></select></div>
-              <div class="form-group"><label>无线带宽</label><select class="input" id="apBw"><option>auto</option><option>20MHz</option><option>40MHz</option></select></div>
-              <div class="form-group"><label>无线信道</label><select class="input" id="apCh"><option>auto</option><option>1</option><option>6</option><option>11</option></select></div>
-              <div class="form-group"><label>信号强度</label><select class="input" id="apSig"><option value="auto">自动</option><option value="weak">弱</option><option value="medium">中</option><option value="strong">强</option></select></div>
-              <div class="form-group switch-row">
-                <label>WPS连接</label>
-                <label class="switch"><input type="checkbox" id="apWps" checked /><span class="slider"></span></label>
-              </div>
-              <div class="form-group switch-row">
-                <label>WPS PIN</label>
-                <label class="switch"><input type="checkbox" id="apWpsPin" /><span class="slider"></span></label>
-              </div>
-              <button type="button" class="btn btn-primary" id="btnSaveWifi">保存</button>
-            </div>
-          </div>
-        </section>
-
         <!-- 管理密码 -->
         <section class="page hidden" id="page-password" data-title="管理密码">
           <div class="card">
@@ -285,24 +247,35 @@
 
         <!-- 系统时间 -->
         <section class="page hidden" id="page-systime" data-title="系统时间">
-          <div class="card">
-            <div class="card-header">系统属性</div>
-            <div class="card-body form-stack">
-              <div class="form-group inline-row">
-                <label class="flex-1">系统时间</label>
-                <input class="input" id="sysTimeDisp" readonly />
-                <button type="button" class="btn btn-secondary" id="btnSyncLocal">同步本地时间</button>
+          <div class="sys-time-grid">
+            <div class="card">
+              <div class="card-header">系统时间</div>
+              <div class="card-body form-stack">
+                <div class="form-group">
+                  <label>设备当前时间</label>
+                  <div class="sys-time-row">
+                    <input class="input" id="sysTimeDisp" readonly />
+                    <button type="button" class="btn btn-secondary" id="btnSyncLocal">同步本地时间</button>
+                  </div>
+                </div>
+                <div class="form-group">
+                  <label>时区</label>
+                  <select class="input" id="tzSelect">
+                    <option value="CST-8">(GMT+08:00) 北京,香港,新加坡,台北</option>
+                    <option value="UTC0">(GMT+00:00) UTC</option>
+                    <option value="CST+9">(GMT+09:00) 东京</option>
+                  </select>
+                </div>
+                <button type="button" class="btn btn-primary sys-time-save" id="btnSaveTime">保存时区</button>
+                <p class="muted sys-time-note">点击“同步本地时间”将使用当前浏览器时间校准设备时钟。</p>
               </div>
-              <div class="form-group"><label>固件版本</label><input class="input" id="fwVerDisp" readonly /></div>
-              <div class="form-group">
-                <label>时区</label>
-                <select class="input" id="tzSelect">
-                  <option value="CST-8">(GMT+08:00) 北京,香港,新加坡,台北</option>
-                  <option value="UTC0">(GMT+00:00) UTC</option>
-                  <option value="CST+9">(GMT+09:00) 东京</option>
-                </select>
+            </div>
+
+            <div class="card">
+              <div class="card-header">版本信息</div>
+              <div class="card-body form-stack">
+                <div class="form-group"><label>固件版本</label><input class="input" id="fwVerDisp" readonly /></div>
               </div>
-              <button type="button" class="btn btn-primary" id="btnSaveTime">保存</button>
             </div>
           </div>
         </section>

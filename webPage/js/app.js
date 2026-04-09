@@ -228,7 +228,9 @@
     for (let i = 0; i < modes.length; i++) {
       s.add(Number(modes[i].wan_type));
     }
-    return Array.from(s).sort((a, b) => a - b);
+    const all = Array.from(s).sort((a, b) => a - b);
+    const visible = all.filter((t) => t !== 0);
+    return visible.length ? visible : all;
   }
 
   function modesForWanType(modes, wt) {
@@ -346,6 +348,7 @@
   async function loadNetworkForm() {
     const [d, md] = await Promise.all([jfetch(API.network, { method: 'GET' }), jfetch(API.mode, { method: 'GET' })]);
     await loadEthWanFields();
+    await loadLanWifiFields();
     cachedModePayload = md;
     const modes = Array.isArray(md.modes) ? md.modes : [];
     setHwHint(md.hardware);
@@ -386,18 +389,36 @@
     if ($('lanLease')) $('lanLease').value = lan.lease_hours != null ? lan.lease_hours : 12;
     if ($('lanDns1')) $('lanDns1').value = lan.dns1 || '';
     if ($('lanDns2')) $('lanDns2').value = lan.dns2 || '';
-    const wan = d.wan || {};
-    if ($('wan4g')) $('wan4g').checked = wan.lte_enabled !== false;
-    if ($('wanNetMode')) $('wanNetMode').value = wan.network_mode || 'auto';
-    toggleStaPanel();
+    toggleLanPanels();
     toggleEthWanPanel();
   }
 
-  function toggleStaPanel() {
+  async function loadLanWifiFields() {
+    try {
+      const d = await jfetch(API.wifiAp, { method: 'GET' });
+      if ($('lanApSsid')) $('lanApSsid').value = d.ssid || '';
+      if ($('lanApEnc')) $('lanApEnc').value = d.encryption_mode || 'WPA2-PSK';
+      if ($('lanApPwd')) $('lanApPwd').value = '';
+      if ($('lanApHidden')) $('lanApHidden').checked = !!d.hidden_ssid;
+    } catch (_) {}
+  }
+
+  function toggleLanPanels() {
     const row = selectedModeRow();
-    const sec = $('staAdvanced');
-    const v = row && row.needs_sta === true;
-    if (sec) sec.classList.toggle('hidden', !v);
+    const ethCard = $('lanEthCard');
+    const comboCard = $('wirelessComboCard');
+    const staSection = $('staSection');
+    const wifiSection = $('wifiLanSection');
+    const divider = $('wirelessSectionDivider');
+    const showEth = row ? row.lan_eth === true : true;
+    const showSta = row ? row.needs_sta === true : false;
+    const showWifi = row ? row.lan_softap === true : false;
+    if (ethCard) ethCard.classList.toggle('hidden', !showEth);
+    if (comboCard) comboCard.classList.toggle('hidden', !(showSta || showWifi));
+    if (staSection) staSection.classList.toggle('hidden', !showSta);
+    if (wifiSection) wifiSection.classList.toggle('hidden', !showWifi);
+    if (divider) divider.classList.toggle('hidden', !(showSta && showWifi));
+    updateNetworkCardsGrid();
   }
 
   function toggleEthWanPanel() {
@@ -405,6 +426,21 @@
     const sec = $('ethWanPanel');
     const v = row && row.needs_eth_wan === true;
     if (sec) sec.classList.toggle('hidden', !v);
+    updateNetworkCardsGrid();
+  }
+
+  function updateNetworkCardsGrid() {
+    const grid = $('networkCardsGrid');
+    if (!grid) return;
+    const ids = ['ethWanPanel', 'wirelessComboCard', 'lanEthCard'];
+    let visible = 0;
+    for (let i = 0; i < ids.length; i++) {
+      const el = $(ids[i]);
+      if (el && !el.classList.contains('hidden')) {
+        visible += 1;
+      }
+    }
+    grid.classList.toggle('single-wide', visible <= 1);
   }
 
   async function saveNetwork() {
@@ -415,6 +451,19 @@
       return;
     }
     const rowPre = selectedModeRow();
+    if (rowPre && rowPre.lan_softap === true) {
+      await jfetch(API.wifiAp, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wifi_enabled: true,
+          ssid: $('lanApSsid') ? $('lanApSsid').value.trim() : '',
+          encryption_mode: $('lanApEnc') ? $('lanApEnc').value : 'WPA2-PSK',
+          password: $('lanApPwd') ? $('lanApPwd').value : '',
+          hidden_ssid: $('lanApHidden') ? $('lanApHidden').checked : false,
+        }),
+      });
+    }
     if (rowPre && rowPre.needs_eth_wan) {
       await jfetch(API.ethWan, {
         method: 'POST',
@@ -434,10 +483,6 @@
         lease_hours: parseInt($('lanLease').value, 10) || 12,
         dns1: $('lanDns1').value.trim(),
         dns2: $('lanDns2').value.trim(),
-      },
-      wan: {
-        lte_enabled: $('wan4g').checked,
-        network_mode: $('wanNetMode').value,
       },
     };
     await jfetch(API.network, {
@@ -516,43 +561,6 @@
       }),
     });
     toast('APN 已保存');
-  }
-
-  async function loadWifiAp() {
-    const d = await jfetch(API.wifiAp, { method: 'GET' });
-    if ($('wifiEn')) $('wifiEn').checked = d.wifi_enabled !== false;
-    if ($('apSsid')) $('apSsid').value = d.ssid || '';
-    if ($('apEnc')) $('apEnc').value = d.encryption_mode || 'WPA2-PSK';
-    if ($('apPwd')) $('apPwd').value = '';
-    if ($('apHidden')) $('apHidden').checked = !!d.hidden_ssid;
-    if ($('apProto')) $('apProto').value = d.protocol || 'auto';
-    if ($('apBw')) $('apBw').value = d.bandwidth || 'auto';
-    if ($('apCh')) $('apCh').value = d.channel || 'auto';
-    if ($('apSig')) $('apSig').value = d.signal_strength || 'auto';
-    if ($('apWps')) $('apWps').checked = d.wps_enabled !== false;
-    if ($('apWpsPin')) $('apWpsPin').checked = !!d.wps_pin_enabled;
-  }
-
-  async function saveWifiAp() {
-    const body = {
-      wifi_enabled: $('wifiEn').checked,
-      ssid: $('apSsid').value.trim(),
-      encryption_mode: $('apEnc').value,
-      password: $('apPwd').value,
-      hidden_ssid: $('apHidden').checked,
-      protocol: $('apProto').value,
-      bandwidth: $('apBw').value,
-      channel: $('apCh').value,
-      signal_strength: $('apSig').value,
-      wps_enabled: $('apWps').checked,
-      wps_pin_enabled: $('apWpsPin').checked,
-    };
-    await jfetch(API.wifiAp, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    toast('WiFi 配置已保存');
   }
 
   async function loadProbes() {
@@ -760,7 +768,6 @@
       users: loadUsers,
       network: loadNetworkForm,
       apn: loadApn,
-      wifi: loadWifiAp,
       password: null,
       systime: loadSysTime,
       upgrade: null,
@@ -825,12 +832,12 @@
       if (Number.isFinite(wt)) {
         fillModeSelect(modes, wt);
       }
-      toggleStaPanel();
+      toggleLanPanels();
       toggleEthWanPanel();
     });
   $('selWorkMode') &&
     $('selWorkMode').addEventListener('change', () => {
-      toggleStaPanel();
+      toggleLanPanels();
       toggleEthWanPanel();
     });
   $('btnSaveEthWan') && $('btnSaveEthWan').addEventListener('click', () => saveEthWanOnly().catch((e) => toast(e.message, true)));
@@ -840,7 +847,6 @@
   $('btnClearSta') && $('btnClearSta').addEventListener('click', () => clearSta().catch((e) => toast(e.message, true)));
 
   $('btnSaveApn') && $('btnSaveApn').addEventListener('click', () => saveApn().catch((e) => toast(e.message, true)));
-  $('btnSaveWifi') && $('btnSaveWifi').addEventListener('click', () => saveWifiAp().catch((e) => toast(e.message, true)));
 
   $('btnSavePwd') && $('btnSavePwd').addEventListener('click', () => savePwd().catch((e) => toast(e.message, true)));
   $('btnSaveTime') && $('btnSaveTime').addEventListener('click', () => saveSysTime().catch((e) => toast(e.message, true)));

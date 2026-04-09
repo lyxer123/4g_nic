@@ -94,6 +94,36 @@ static void log_ring_fmt(const char *fmt, ...)
 #define NVS_KEY_APNUSER "apn_user"
 #define NVS_KEY_APNPWD  "apn_pwd"
 
+static const char *tz_display_to_posix(const char *tz_display)
+{
+    if (!tz_display || tz_display[0] == '\0') {
+        return "CST-8";
+    }
+    if (strstr(tz_display, "Asia/Shanghai") || strstr(tz_display, "GMT+08")) {
+        return "CST-8";
+    }
+    if (strstr(tz_display, "UTC")) {
+        return "UTC0";
+    }
+    /* Fallback: keep previous behavior for custom user-entered values */
+    return tz_display;
+}
+
+static void apply_timezone_from_nvs(void)
+{
+    char tz[64] = "(GMT+08:00) Asia/Shanghai";
+    nvs_handle_t h = 0;
+    if (nvs_open(NVS_NS_WEBUI, NVS_READONLY, &h) == ESP_OK) {
+        size_t n = sizeof(tz);
+        if (nvs_get_str(h, NVS_KEY_TZ, tz, &n) != ESP_OK) {
+            strlcpy(tz, "(GMT+08:00) Asia/Shanghai", sizeof(tz));
+        }
+        nvs_close(h);
+    }
+    setenv("TZ", tz_display_to_posix(tz), 1);
+    tzset();
+}
+
 typedef struct {
     bool dhcp;
     char ip[16];
@@ -1811,6 +1841,7 @@ static esp_err_t uri_system_probes_post(httpd_req_t *req)
 static esp_err_t uri_system_time_get(httpd_req_t *req)
 {
     (void)req;
+    apply_timezone_from_nvs();
     char tz[64] = "(GMT+08:00) Asia/Shanghai";
     nvs_handle_t h = 0;
     if (nvs_open(NVS_NS_WEBUI, NVS_READONLY, &h) == ESP_OK) {
@@ -1859,7 +1890,7 @@ static esp_err_t uri_system_time_post(httpd_req_t *req)
             nvs_commit(h);
             nvs_close(h);
         }
-        setenv("TZ", tz->valuestring, 1);
+        setenv("TZ", tz_display_to_posix(tz->valuestring), 1);
         tzset();
     }
     cJSON_Delete(root);
