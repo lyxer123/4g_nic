@@ -2,787 +2,588 @@
   'use strict';
 
   const API = {
-    scan: '/api/wifi/scan',
-    wifi: '/api/wifi',
-    ethWan: '/api/eth_wan',
-    ethWanClear: '/api/eth_wan/clear',
+    dashboard: '/api/dashboard/overview',
+    network: '/api/network/config',
+    apn: '/api/network/apn',
+    wifiAp: '/api/wifi/ap',
+    wifiSta: '/api/wifi',
+    wifiScan: '/api/wifi/scan',
+    wifiClear: '/api/wifi/clear',
     mode: '/api/mode',
-    modeApply: '/api/mode/apply',
-    modeStatus: '/api/mode/status',
-    overview: '/api/system/overview',
+    probes: '/api/system/probes',
+    time: '/api/system/time',
+    syncTime: '/api/system/sync_time',
+    reboot: '/api/system/reboot',
+    rbSched: '/api/system/reboot/schedule',
+    logs: '/api/system/logs',
+    password: '/api/system/password',
+    factory: '/api/system/factory_reset',
+    cfgExport: '/api/system/config/export',
+    cfgImport: '/api/system/config/import',
+    usersOnline: '/api/users/online',
+    blacklist: '/api/users/blacklist',
+    traffic: '/api/traffic',
   };
-
-  /** 最近一次 /api/mode 返回的 modes，用于 WAN/LAN 说明（优先于本地写死表） */
-  let sLastModeProfiles = null;
-
-  const LS_KEYS = {
-    sta: 'staConfig',
-  };
-
-  /** 与固件 work_mode id 一致；用于界面中文说明 */
-  const MODE_LABEL_ZH = {
-    1: '4G(Cat1) → Wi-Fi 热点',
-    2: '4G(Cat1) → W5500 以太网(LAN)',
-    3: '4G(Cat1) → Wi-Fi + W5500',
-    4: 'Wi-Fi STA → 热点',
-    5: 'Wi-Fi STA → W5500(LAN)',
-    6: 'Wi-Fi STA → Wi-Fi + W5500',
-    7: 'W5500(WAN) → 仅热点',
-    8: 'W5500(WAN) → W5500(LAN)',
-    9: 'W5500(WAN) → Wi-Fi + W5500',
-  };
-
-  const MODE_NET_ZH = {
-    1: { wan: 'USB 4G Cat1（PPP 等，由固件拨号）', lan: 'Wi-Fi SoftAP' },
-    2: { wan: 'USB 4G Cat1', lan: 'W5500 作为下行以太网' },
-    3: { wan: 'USB 4G Cat1', lan: 'Wi-Fi SoftAP 与 W5500 同时作为 LAN' },
-    4: { wan: 'Wi-Fi STA 连接上级路由', lan: 'Wi-Fi SoftAP' },
-    5: { wan: 'Wi-Fi STA', lan: 'W5500 作为下行以太网' },
-    6: { wan: 'Wi-Fi STA', lan: 'SoftAP + W5500 同时作为 LAN' },
-    7: { wan: 'W5500 作为上行 WAN', lan: '仅 Wi-Fi SoftAP（无 W5500 LAN 转发）' },
-    8: { wan: 'W5500 作为上行 WAN', lan: 'W5500 作为下行以太网（实验组合）' },
-    9: { wan: 'W5500 作为上行 WAN', lan: 'Wi-Fi SoftAP + W5500（实验组合）' },
-  };
-
-  function wanTextFromBackendWanType(wanType) {
-    const t = Number(wanType);
-    if (t === 1) return 'USB 4G Cat1（PPP 等，由固件拨号）';
-    if (t === 2) return 'Wi-Fi STA 连接上级路由';
-    if (t === 3) return 'W5500 有线作上行 WAN';
-    return '—';
-  }
-
-  function lanTextFromBackendProfile(m) {
-    if (!m) return '—';
-    const parts = [];
-    if (m.lan_softap) parts.push('Wi-Fi SoftAP');
-    if (m.lan_eth) parts.push('W5500 以太网(LAN)');
-    if (parts.length === 0) return '无下行共享口';
-    return parts.join(' + ');
-  }
-
-  function modeDisplayLabel(m) {
-    if (!m) return '';
-    const zh = MODE_LABEL_ZH[m.id];
-    if (zh) return zh;
-    return typeof m.label === 'string' ? m.label : `模式 ${m.id}`;
-  }
-
-  function renderRuntimeStatus(st) {
-    const el = $('modeRuntimeStatus');
-    if (!el) return;
-    if (!st || typeof st !== 'object') {
-      el.style.display = 'none';
-      return;
-    }
-    const err = st.last_error != null && Number(st.last_error) !== 0
-      ? ` last_error=${st.last_error}`
-      : '';
-    const rb = st.rollback_last_apply ? '（上次应用失败已回滚）' : '';
-    el.textContent = `应用状态：当前运行模式 ${st.current_mode || '—'}，目标 ${st.target_mode || '—'}，` +
-      `阶段 ${st.phase || '—'}， applying=${!!st.applying}${rb}${err}`;
-    el.style.display = 'block';
-  }
 
   function $(id) {
     return document.getElementById(id);
   }
 
-  function setStatus(ok, text) {
-    const dot = document.querySelector('.status-dot');
-    const t = $('connectionText');
-    if (dot) dot.classList.toggle('ok', !!ok);
-    if (t) t.textContent = text || (ok ? '已连接' : '未连接');
+  function toast(msg, isErr) {
+    const t = $('toast');
+    const b = $('toastBody');
+    if (!t || !b) return;
+    b.textContent = msg;
+    t.classList.toggle('error', !!isErr);
+    t.hidden = false;
+    clearTimeout(toast._tm);
+    toast._tm = setTimeout(() => {
+      t.hidden = true;
+    }, 2600);
   }
 
-  let toastTimer = null;
-  function toast(msg, isError) {
-    const box = $('toast');
-    const content = $('toastContent');
-    if (!box || !content) return;
-    content.textContent = String(msg || '');
-    box.classList.toggle('error', !!isError);
-    box.style.display = 'block';
-    if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => {
-      box.style.display = 'none';
-    }, 2500);
-  }
-
-  function escapeHtml(s) {
-    return String(s || '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-  }
-
-  function setResultBoxVisible(visible) {
-    const box = $('resultBox');
-    if (box) box.style.display = visible ? 'block' : 'none';
-  }
-
-  function showSavedPreview(ssid, pwd) {
-    const s = $('savedSsid');
-    const p = $('savedPwd');
-    if (s) s.textContent = ssid ? ssid : '—';
-    if (p) p.textContent = pwd ? '******' : '—';
-    setResultBoxVisible(true);
-  }
-
-  function getForm() {
-    const ssid = $('wifiSsidInput') ? $('wifiSsidInput').value.trim() : '';
-    const password = $('wifiPasswordInput') ? $('wifiPasswordInput').value : '';
-    return { ssid, password };
-  }
-
-  function setForm(ssid, password) {
-    const s = $('wifiSsidInput');
-    const p = $('wifiPasswordInput');
-    if (s) s.value = ssid || '';
-    if (p) p.value = password || '';
-  }
-
-  function loadFromLocalStorage() {
+  async function jfetch(url, opt) {
+    const res = await fetch(url, opt);
+    const txt = await res.text();
+    let data = null;
     try {
-      const raw = localStorage.getItem(LS_KEYS.sta);
-      if (!raw) return null;
-      const data = JSON.parse(raw);
-      if (!data || typeof data !== 'object') return null;
-      return {
-        ssid: typeof data.ssid === 'string' ? data.ssid : '',
-        password: typeof data.password === 'string' ? data.password : '',
-      };
+      data = txt ? JSON.parse(txt) : null;
     } catch (_) {
-      return null;
+      data = { raw: txt };
     }
-  }
-
-  function saveToLocalStorage(ssid, password) {
-    try {
-      localStorage.setItem(LS_KEYS.sta, JSON.stringify({ ssid, password }));
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  async function apiScan() {
-    const res = await fetch(API.scan, { method: 'GET' });
-    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const msg = data && data.message ? data.message : `HTTP ${res.status}`;
-      throw new Error(msg);
-    }
-    const aps = Array.isArray(data) ? data : (Array.isArray(data.aps) ? data.aps : []);
-    return aps
-      .filter(ap => ap && typeof ap.ssid === 'string' && ap.ssid.trim())
-      .map(ap => ({ ssid: ap.ssid.trim(), rssi: ap.rssi }));
-  }
-
-  function renderSsidList(aps) {
-    const box = $('availableSsidsBox');
-    const list = $('availableSsidsList');
-    if (!box || !list) return;
-
-    box.style.display = 'block';
-    if (!aps || aps.length === 0) {
-      list.innerHTML = '<li>未找到 Wi-Fi</li>';
-      return;
-    }
-
-    list.innerHTML = aps.map(ap => {
-      const s = escapeHtml(ap.ssid);
-      const r = (ap.rssi === 0 || ap.rssi) ? ` (${ap.rssi} dBm)` : '';
-      return `<li data-ssid="${s}">${s}${r}</li>`;
-    }).join('');
-
-    list.querySelectorAll('li[data-ssid]').forEach(li => {
-      li.addEventListener('click', () => {
-        const ssid = li.getAttribute('data-ssid') || '';
-        setForm(ssid, $('wifiPasswordInput') ? $('wifiPasswordInput').value : '');
-        box.style.display = 'none';
-      });
-    });
-  }
-
-  async function onScanClick() {
-    const btn = $('wifiScanBtn');
-    if (btn) btn.disabled = true;
-    try {
-      renderSsidList([{ ssid: '扫描中…', rssi: '' }]);
-      const aps = await apiScan();
-      renderSsidList(aps);
-      toast('扫描完成');
-      setStatus(true, '设备在线');
-    } catch (e) {
-      renderSsidList([]);
-      toast(`扫描失败：${e && e.message ? e.message : '未知错误'}`, true);
-      setStatus(false, '设备离线/接口未实现');
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-  }
-
-  async function apiLoadSta() {
-    const res = await fetch(API.wifi, { method: 'GET' });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const msg = data && data.message ? data.message : `HTTP ${res.status}`;
-      throw new Error(msg);
-    }
-    const ssid =
-      (typeof data.ssid === 'string' ? data.ssid :
-      (typeof data.sta_ssid === 'string' ? data.sta_ssid : '')) || '';
-    const password =
-      (typeof data.password === 'string' ? data.password :
-      (typeof data.sta_password === 'string' ? data.sta_password : '')) || '';
-    return { ssid, password };
-  }
-
-  async function apiSaveSta(ssid, password) {
-    const payload = { ssid, password };
-    const res = await fetch(API.wifi, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || (data && data.status === 'error')) {
-      const msg = data && data.message ? data.message : `HTTP ${res.status}`;
-      throw new Error(msg);
+      const m = (data && (data.message || data.status)) || res.statusText;
+      throw new Error(m || 'HTTP ' + res.status);
     }
     return data;
   }
 
-  async function onSaveClick() {
-    const { ssid, password } = getForm();
-    if (!ssid) {
-      toast('请先填写 SSID', true);
-      return;
-    }
-
-    try {
-      await apiSaveSta(ssid, password);
-      toast('已保存到设备');
-      showSavedPreview(ssid, password);
-      setStatus(true, '设备在线');
-      saveToLocalStorage(ssid, password);
-    } catch (e) {
-      const ok = saveToLocalStorage(ssid, password);
-      if (ok) {
-        toast(`设备保存失败，已保存到本地：${e && e.message ? e.message : '未知错误'}`, true);
-        showSavedPreview(ssid, password);
-      } else {
-        toast(`保存失败：${e && e.message ? e.message : '未知错误'}`, true);
-      }
-      setStatus(false, '设备离线/接口未实现');
-    }
-  }
-
-  async function onLoadClick() {
-    try {
-      const data = await apiLoadSta();
-      setForm(data.ssid, data.password);
-      showSavedPreview(data.ssid, data.password);
-      toast('已从设备读取');
-      setStatus(true, '设备在线');
-      saveToLocalStorage(data.ssid, data.password);
-    } catch (e) {
-      const local = loadFromLocalStorage();
-      if (local) {
-        setForm(local.ssid, local.password);
-        showSavedPreview(local.ssid, local.password);
-        toast(`设备读取失败，已从本地读取：${e && e.message ? e.message : '未知错误'}`, true);
-      } else {
-        toast(`读取失败：${e && e.message ? e.message : '未知错误'}`, true);
-      }
-      setStatus(false, '设备离线/接口未实现');
-    }
-  }
-
-  async function onClearClick() {
-    setForm('', '');
-    setResultBoxVisible(false);
-    try {
-      localStorage.removeItem(LS_KEYS.sta);
-    } catch (_) {}
-
-    try {
-      const res = await fetch('/api/wifi/clear', { method: 'POST' });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || (data && data.status === 'error')) {
-        const msg = data && data.message ? data.message : `HTTP ${res.status}`;
-        throw new Error(msg);
-      }
-      toast('设备 STA 已清空');
-      setStatus(false, '未连接');
-    } catch (e) {
-      toast(`清空设备失败：${e && e.message ? e.message : '未知错误'}`, true);
-      setStatus(false, '设备离线/接口未实现');
-    }
-  }
-
-  function getEthWanForm() {
-    return {
-      dhcp: !!($('ethWanDhcp') && $('ethWanDhcp').checked),
-      ip: $('ethWanIp') ? $('ethWanIp').value.trim() : '',
-      mask: $('ethWanMask') ? $('ethWanMask').value.trim() : '',
-      gw: $('ethWanGw') ? $('ethWanGw').value.trim() : '',
-      dns1: $('ethWanDns1') ? $('ethWanDns1').value.trim() : '',
-      dns2: $('ethWanDns2') ? $('ethWanDns2').value.trim() : '',
-    };
-  }
-
-  function onEthWanDhcpChange() {
-    const disabled = !!($('ethWanDhcp') && $('ethWanDhcp').checked);
-    ['ethWanIp', 'ethWanMask', 'ethWanGw', 'ethWanDns1', 'ethWanDns2'].forEach((id) => {
-      const el = $(id);
-      if (el) el.disabled = disabled;
+  function showPage(id) {
+    document.querySelectorAll('.page').forEach((p) => {
+      p.classList.toggle('hidden', p.id !== 'page-' + id);
     });
+    document.querySelectorAll('.nav-item').forEach((n) => {
+      n.classList.toggle('active', n.getAttribute('data-page') === id);
+    });
+    const sec = document.querySelector('.page#page-' + id);
+    const title = sec ? sec.getAttribute('data-title') : '';
+    const pt = $('pageTitle');
+    if (pt && title) pt.textContent = title;
   }
 
-  function setEthWanForm(data) {
-    if ($('ethWanDhcp')) $('ethWanDhcp').checked = !!(data && data.dhcp);
-    if ($('ethWanIp')) $('ethWanIp').value = data && data.ip ? String(data.ip) : '';
-    if ($('ethWanMask')) $('ethWanMask').value = data && data.mask ? String(data.mask) : '';
-    if ($('ethWanGw')) $('ethWanGw').value = data && data.gw ? String(data.gw) : '';
-    if ($('ethWanDns1')) $('ethWanDns1').value = data && data.dns1 ? String(data.dns1) : '';
-    if ($('ethWanDns2')) $('ethWanDns2').value = data && data.dns2 ? String(data.dns2) : '';
-    onEthWanDhcpChange();
+  function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
   }
 
-  async function fetchEthWanConfig() {
-    const res = await fetch(API.ethWan, { method: 'GET' });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const msg = data && data.message ? data.message : `HTTP ${res.status}`;
-      throw new Error(msg);
+  async function loadOverview() {
+    const d = await jfetch(API.dashboard, { method: 'GET' });
+    const sys = d.system || {};
+    const rows = [
+      ['系统模式', sys.system_mode || '—'],
+      ['型号', '4G_NIC'],
+      ['版本', sys.firmware_version || '—'],
+      ['CPU', sys.cpu_percent != null ? sys.cpu_percent + '%' : '—'],
+      ['系统时间', sys.system_time || '—'],
+      ['内存', sys.memory_percent != null ? sys.memory_percent + '%' : '—'],
+      ['运行时间', fmtDuration(sys.uptime_s)],
+      ['在线用户数', String(sys.online_users != null ? sys.online_users : '—')],
+    ];
+    const el = $('dashSystem');
+    if (el) {
+      el.innerHTML = rows.map(([a, b]) => '<dt>' + esc(a) + '</dt><dd>' + esc(b) + '</dd>').join('');
     }
-    setEthWanForm(data);
+    const cell = d.cellular || {};
+    const cr = [
+      ['运营商', cell.operator || '—'],
+      ['网络模式', cell.network_mode || '—'],
+      ['IMEI', cell.imei || '—'],
+      ['ICCID', cell.iccid || '—'],
+      ['网络信号', cell.signal || '—'],
+      ['当月流量', cell.monthly_traffic || '—'],
+      ['USB', cell.usb_probe || '—'],
+    ];
+    const ce = $('dashCell');
+    if (ce) {
+      ce.innerHTML = cr.map(([a, b]) => '<dt>' + esc(a) + '</dt><dd>' + esc(b) + '</dd>').join('');
+    }
+    const ifaces = Array.isArray(d.interfaces) ? d.interfaces : [];
+    const ig = $('dashIfaces');
+    if (ig) {
+      ig.innerHTML = ifaces
+        .map(
+          (x) =>
+            '<div class="iface-card"><h4>' +
+            esc(x.name) +
+            '</h4><dl>' +
+            '<dt>地址</dt><dd>' +
+            esc(x.address) +
+            '</dd>' +
+            '<dt>MAC</dt><dd>' +
+            esc(x.mac) +
+            '</dd>' +
+            '<dt>接收</dt><dd>' +
+            esc(x.rx) +
+            '</dd>' +
+            '<dt>发送</dt><dd>' +
+            esc(x.tx) +
+            '</dd></dl></div>'
+        )
+        .join('');
+    }
   }
 
-  async function saveEthWanConfig() {
-    const res = await fetch(API.ethWan, {
+  function fmtDuration(sec) {
+    if (sec == null || sec === '') return '—';
+    const s = Math.floor(Number(sec));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    return h + '时 ' + m + '分 ' + r + '秒';
+  }
+
+  async function loadUsers() {
+    const d = await jfetch(API.usersOnline, { method: 'GET' });
+    const users = Array.isArray(d.users) ? d.users : [];
+    const tb = document.querySelector('#tableUsers tbody');
+    if (tb) {
+      tb.innerHTML = users
+        .map(
+          (u, i) =>
+            '<tr><td>' +
+            esc(u.id != null ? u.id : i + 1) +
+            '</td><td>' +
+            esc(u.hostname) +
+            '</td><td>' +
+            esc(u.online_duration) +
+            '</td><td>' +
+            esc(u.ip_address) +
+            '</td><td>' +
+            esc(u.mac_address) +
+            '</td><td>—</td><td>—</td></tr>'
+        )
+        .join('');
+    }
+    const foot = $('usersFoot');
+    if (foot) {
+      foot.textContent = '共 ' + (d.total != null ? d.total : users.length) + ' 条';
+    }
+  }
+
+  async function loadBlacklist() {
+    const d = await jfetch(API.blacklist, { method: 'GET' });
+    const pre = $('blacklistJson');
+    if (pre) pre.textContent = JSON.stringify(d, null, 2);
+  }
+
+  async function loadNetworkForm() {
+    const d = await jfetch(API.network, { method: 'GET' });
+    const wm = $('workingMode');
+    if (wm && d.working_mode) wm.value = d.working_mode;
+    const lan = d.lan || {};
+    if ($('lanIp')) $('lanIp').value = lan.ip || '';
+    if ($('lanMask')) $('lanMask').value = lan.mask || '';
+    if ($('lanDhcp')) $('lanDhcp').checked = !!lan.dhcp_enabled;
+    if ($('lanStart')) $('lanStart').value = lan.dhcp_start || '';
+    if ($('lanEnd')) $('lanEnd').value = lan.dhcp_end || '';
+    if ($('lanLease')) $('lanLease').value = lan.lease_hours != null ? lan.lease_hours : 12;
+    if ($('lanDns1')) $('lanDns1').value = lan.dns1 || '';
+    if ($('lanDns2')) $('lanDns2').value = lan.dns2 || '';
+    const wan = d.wan || {};
+    if ($('wan4g')) $('wan4g').checked = wan.lte_enabled !== false;
+    if ($('wanNetMode')) $('wanNetMode').value = wan.network_mode || 'auto';
+    toggleStaPanel();
+  }
+
+  function toggleStaPanel() {
+    const wm = $('workingMode');
+    const sec = $('staAdvanced');
+    const v = wm && wm.value === 'router';
+    if (sec) sec.classList.toggle('hidden', !v);
+  }
+
+  async function saveNetwork() {
+    const body = {
+      working_mode: $('workingMode') ? $('workingMode').value : '4g',
+      lan: {
+        ip: $('lanIp').value.trim(),
+        mask: $('lanMask').value.trim(),
+        dhcp_enabled: $('lanDhcp').checked,
+        dhcp_start: $('lanStart').value.trim(),
+        dhcp_end: $('lanEnd').value.trim(),
+        lease_hours: parseInt($('lanLease').value, 10) || 12,
+        dns1: $('lanDns1').value.trim(),
+        dns2: $('lanDns2').value.trim(),
+      },
+      wan: {
+        lte_enabled: $('wan4g').checked,
+        network_mode: $('wanNetMode').value,
+      },
+    };
+    await jfetch(API.network, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(getEthWanForm()),
+      body: JSON.stringify(body),
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || (data && data.status === 'error')) {
-      const msg = data && data.message ? data.message : `HTTP ${res.status}`;
-      throw new Error(msg);
-    }
+    toast('网络配置已保存');
   }
 
-  async function clearEthWanConfig() {
-    const res = await fetch(API.ethWanClear, { method: 'POST' });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || (data && data.status === 'error')) {
-      const msg = data && data.message ? data.message : `HTTP ${res.status}`;
-      throw new Error(msg);
-    }
+  async function loadSta() {
+    const d = await jfetch(API.wifiSta, { method: 'GET' });
+    if ($('staSsid')) $('staSsid').value = d.ssid || '';
+    if ($('staPwd')) $('staPwd').value = d.password || '';
+    toast('已读取 STA');
   }
 
-  function fmtIp(v) {
-    if (v === null || v === undefined) return '—';
-    const s = String(v);
-    return s === '' ? '—' : s;
-  }
-
-  function fmtBool(v) {
-    if (v === true) return '是';
-    if (v === false) return '否';
-    return '—';
-  }
-
-  function renderOverview(data) {
-    const grid = $('overviewGrid');
-    if (!grid) return;
-
-    const rows = [
-      ['Wi-Fi 模式', data.wifi_mode != null ? String(data.wifi_mode) : '—'],
-      ['SoftAP IPv4', fmtIp(data.ip_softap)],
-      ['STA IPv4', fmtIp(data.ip_sta)],
-      ['ETH LAN IPv4', fmtIp(data.ip_eth_lan)],
-      ['ETH WAN IPv4', fmtIp(data.ip_eth_wan)],
-      ['PPP IPv4', fmtIp(data.ip_ppp)],
-      ['空闲堆（字节）', data.free_heap != null ? String(Math.round(data.free_heap)) : '—'],
-      ['运行时间（秒）', data.uptime_s != null ? String(Math.round(data.uptime_s)) : '—'],
-      ['W5500', fmtBool(data.hw_w5500)],
-      ['USB 模块(枚举)', fmtBool(data.hw_usb_modem_present)],
-      ['USB 作 4G WAN', fmtBool(data.hw_usb_lte)],
-      ['W5500 WAN 配置', data.saved_eth_wan
-        ? (data.saved_eth_wan.dhcp ? 'DHCP' : `Static ${data.saved_eth_wan.ip || '—'}`)
-        : '—'],
-      ['已保存工作模式', data.saved_work_mode != null && data.saved_work_mode >= 1
-        ? `${data.saved_work_mode} · ${data.saved_work_mode_label || MODE_LABEL_ZH[data.saved_work_mode] || ''}`
-        : '未设置'],
-      ['模式运行时', data.mode_runtime && data.mode_runtime.phase
-        ? `模式 ${data.mode_runtime.current_mode || '—'} / ${data.mode_runtime.phase}`
-        : '—'],
-    ];
-
-    grid.innerHTML = rows.map(([dt, dd]) =>
-      `<div class="kv-row"><dt>${escapeHtml(dt)}</dt><dd>${escapeHtml(dd)}</dd></div>`
-    ).join('');
-  }
-
-  async function fetchOverview() {
-    const ph = $('overviewPlaceholder');
-    try {
-      const res = await fetch(API.overview, { method: 'GET' });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const msg = data && data.message ? data.message : `HTTP ${res.status}`;
-        throw new Error(msg);
-      }
-      renderOverview(data);
-      setStatus(true, '设备在线');
-    } catch (e) {
-      if (ph) {
-        ph.textContent = `加载失败：${e && e.message ? e.message : '未知错误'}`;
-      } else {
-        const grid = $('overviewGrid');
-        if (grid) {
-          grid.innerHTML = `<div class="kv-row"><dt>错误</dt><dd>${escapeHtml(e.message || '未知')}</dd></div>`;
-        }
-      }
-      setStatus(false, '设备离线/接口未实现');
-    }
-  }
-
-  function updateWanLanDesc(modeId) {
-    const wan = $('wanDesc');
-    const lan = $('lanDesc');
-    if (!wan || !lan) return;
-    const list = sLastModeProfiles || [];
-    const m = list.find(x => x.id === modeId);
-    if (m) {
-      wan.textContent = wanTextFromBackendWanType(m.wan_type);
-      lan.textContent = lanTextFromBackendProfile(m);
+  async function saveSta() {
+    const ssid = $('staSsid').value.trim();
+    const password = $('staPwd').value;
+    if (!ssid) {
+      toast('请填写 SSID', true);
       return;
     }
-    const n = MODE_NET_ZH[modeId];
-    if (!n) {
-      wan.textContent = '—';
-      lan.textContent = '—';
-      return;
-    }
-    wan.textContent = n.wan;
-    lan.textContent = n.lan;
+    await jfetch(API.wifiSta, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ssid, password }),
+    });
+    toast('STA 已保存');
   }
 
-  function selectedModeNeedsSta() {
-    const sel = $('workModeSelect');
-    if (!sel || !sel.value) return false;
-    const opt = sel.options[sel.selectedIndex];
-    return opt && opt.dataset.needsSta === '1';
+  async function clearSta() {
+    await jfetch(API.wifiClear, { method: 'POST' });
+    if ($('staSsid')) $('staSsid').value = '';
+    if ($('staPwd')) $('staPwd').value = '';
+    toast('STA 已清空');
   }
 
-  function selectedModeNeedsEthWan() {
-    const sel = $('workModeSelect');
-    if (!sel || !sel.value) return false;
-    const opt = sel.options[sel.selectedIndex];
-    return opt && opt.dataset.needsEthWan === '1';
-  }
-
-  function onWorkModeSelectChange() {
-    const staBlock = $('staSection');
-    const ethWanBlock = $('ethWanSection');
-    const id = parseInt($('workModeSelect').value, 10);
-    if (staBlock) {
-      staBlock.style.display = selectedModeNeedsSta() ? 'block' : 'none';
-    }
-    if (ethWanBlock) {
-      ethWanBlock.style.display = selectedModeNeedsEthWan() ? 'block' : 'none';
-    }
-    if (!Number.isNaN(id) && id >= 1) {
-      updateWanLanDesc(id);
-    } else {
-      updateWanLanDesc(0);
-    }
-  }
-
-  function renderHwSummary(hw) {
-    $('hwW5500').textContent = fmtBool(hw && hw.w5500);
-    $('hwUsbProbe').textContent = fmtBool(hw && hw.usb_modem_present);
-    $('hwUsbWan').textContent = fmtBool(hw && hw.usb_lte);
-    $('hwUsbIds').textContent = (hw && hw.usb_ids) ? String(hw.usb_ids) : '—';
-  }
-
-  function showModeApiError(msg) {
-    const el = $('modeApiErrorHint');
-    if (!el) return;
-    el.textContent = msg || '';
-    el.style.display = msg ? 'block' : 'none';
-  }
-
-  async function fetchModeConfig() {
-    const sel = $('workModeSelect');
-    const noHint = $('noModesHint');
-    const saveBtn = $('modeSaveBtn');
-    const applyBtn = $('modeApplyBtn');
-    const invalidHint = $('modeInvalidHint');
-    showModeApiError('');
-    try {
-      const res = await fetch(API.mode, { method: 'GET' });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const msg = data && data.message ? data.message : `HTTP ${res.status}`;
-        throw new Error(msg);
-      }
-      renderHwSummary(data.hardware);
-      renderRuntimeStatus(data.runtime_status);
-      fetchEthWanConfig().catch(() => {});
-
-      const modes = Array.isArray(data.modes) ? data.modes : [];
-      sLastModeProfiles = modes;
-      sel.innerHTML = '';
-      if (modes.length === 0) {
-        sLastModeProfiles = null;
-        sel.disabled = true;
-        if (saveBtn) saveBtn.disabled = true;
-        if (applyBtn) applyBtn.disabled = true;
-        if (noHint) {
-          noHint.style.display = 'block';
-          noHint.textContent = '当前硬件未检测到可用工作模式，请检查 W5500 / USB 模块是否已连接并被识别。';
-        }
-        const opt = document.createElement('option');
-        opt.value = '';
-        opt.textContent = '无可用模式';
-        sel.appendChild(opt);
-        if (invalidHint) invalidHint.style.display = 'none';
-        onWorkModeSelectChange();
-        setStatus(true, '设备在线');
-        return;
-      }
-      if (noHint) noHint.style.display = 'none';
-      sel.disabled = false;
-      if (saveBtn) saveBtn.disabled = false;
-      if (applyBtn) applyBtn.disabled = false;
-
-      const placeholder = document.createElement('option');
-      placeholder.value = '';
-      placeholder.textContent = '请选择…';
-      sel.appendChild(placeholder);
-
-      for (let i = 0; i < modes.length; i++) {
-        const m = modes[i];
-        const opt = document.createElement('option');
-        opt.value = String(m.id);
-        const label = modeDisplayLabel(m);
-        opt.textContent = `${m.id}. ${label}`;
-        opt.dataset.needsSta = m.needs_sta ? '1' : '0';
-        opt.dataset.needsEthWan = m.needs_eth_wan ? '1' : '0';
-        sel.appendChild(opt);
-      }
-
-      const cur = data.current;
-      const allowed = modes.some(x => x.id === cur);
-      if (invalidHint) {
-        if (cur >= 1 && !allowed) {
-          invalidHint.textContent = `NVS 中保存的模式 ${cur} 在当前硬件下不可用，请重新选择并保存。`;
-          invalidHint.style.display = 'block';
-        } else {
-          invalidHint.style.display = 'none';
-        }
-      }
-
-      if (allowed) {
-        sel.value = String(cur);
-      } else {
-        sel.value = '';
-      }
-      onWorkModeSelectChange();
-      setStatus(true, '设备在线');
-    } catch (e) {
-      sel.innerHTML = '';
-      const opt = document.createElement('option');
-      opt.value = '';
-      opt.textContent = '加载失败';
-      sel.appendChild(opt);
-      sel.disabled = true;
-      if (saveBtn) saveBtn.disabled = true;
-      if ($('modeApplyBtn')) $('modeApplyBtn').disabled = true;
-      const raw = e && e.message ? String(e.message) : '未知错误';
-      let detail = raw;
-      if (/HTTP\s+404/i.test(raw) || raw === 'Failed to fetch') {
-        detail = `${raw}。常见原因：只更新了 www 网页分区，应用固件仍是旧版（无 /api/mode）。请用 idf.py flash 烧录完整应用，或确认本页是从设备 IP 打开（勿用 file:// 本地文件）。`;
-      }
-      showModeApiError(detail);
-      toast(`模式接口失败：${raw}`, true);
-      setStatus(false, '设备离线/接口未实现');
-    }
-  }
-
-  async function onModeSaveClick() {
-    const sel = $('workModeSelect');
-    const hint = $('modeSaveHint');
-    const id = parseInt(sel.value, 10);
-    if (!sel.value || Number.isNaN(id)) {
-      toast('请先选择工作模式', true);
-      return;
-    }
-    try {
-      const res = await fetch(API.mode, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: id }),
+  async function scanSta() {
+    const pop = $('ssidPop');
+    const d = await jfetch(API.wifiScan, { method: 'GET' });
+    const aps = Array.isArray(d.aps) ? d.aps : [];
+    if (pop) {
+      pop.hidden = false;
+      pop.innerHTML = aps
+        .map(
+          (a) =>
+            '<li data-ssid="' + esc(a.ssid).replace(/"/g, '&quot;') + '">' + esc(a.ssid) + ' (' + esc(a.rssi) + ')</li>'
+        )
+        .join('');
+      pop.querySelectorAll('li[data-ssid]').forEach((li) => {
+        li.addEventListener('click', () => {
+          $('staSsid').value = li.getAttribute('data-ssid') || '';
+          pop.hidden = true;
+        });
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || (data && data.status === 'error')) {
-        const msg = data && data.message ? data.message : `HTTP ${res.status}`;
-        throw new Error(msg);
-      }
-      toast('工作模式已保存并尝试应用');
-      if (hint) {
-        hint.textContent = data.hint || '已保存到 NVS，重启后仍会保留。';
-        hint.style.display = 'block';
-      }
-      if ($('modeInvalidHint')) $('modeInvalidHint').style.display = 'none';
-      fetchOverview();
-      fetchModeRuntimeOnly();
-    } catch (e) {
-      toast(`保存失败：${e && e.message ? e.message : '未知错误'}`, true);
     }
   }
 
-  async function onModeApplyOnlyClick() {
-    const sel = $('workModeSelect');
-    const id = parseInt(sel.value, 10);
-    const body = (!sel.value || Number.isNaN(id)) ? '{}' : JSON.stringify({ mode: id });
-    try {
-      const res = await fetch(API.modeApply, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || (data && data.status === 'error')) {
-        const msg = data && data.message ? data.message : `HTTP ${res.status}`;
-        throw new Error(msg);
+  async function loadApn() {
+    const d = await jfetch(API.apn, { method: 'GET' });
+    if ($('apnName')) $('apnName').value = d.apn || '';
+    if ($('apnUser')) $('apnUser').value = d.username || '';
+    if ($('apnPass')) $('apnPass').value = d.password || '';
+  }
+
+  async function saveApn() {
+    await jfetch(API.apn, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apn: $('apnName').value.trim(),
+        username: $('apnUser').value.trim(),
+        password: $('apnPass').value,
+      }),
+    });
+    toast('APN 已保存');
+  }
+
+  async function loadWifiAp() {
+    const d = await jfetch(API.wifiAp, { method: 'GET' });
+    if ($('wifiEn')) $('wifiEn').checked = d.wifi_enabled !== false;
+    if ($('apSsid')) $('apSsid').value = d.ssid || '';
+    if ($('apEnc')) $('apEnc').value = d.encryption_mode || 'WPA2-PSK';
+    if ($('apPwd')) $('apPwd').value = '';
+    if ($('apHidden')) $('apHidden').checked = !!d.hidden_ssid;
+    if ($('apProto')) $('apProto').value = d.protocol || 'auto';
+    if ($('apBw')) $('apBw').value = d.bandwidth || 'auto';
+    if ($('apCh')) $('apCh').value = d.channel || 'auto';
+    if ($('apSig')) $('apSig').value = d.signal_strength || 'auto';
+    if ($('apWps')) $('apWps').checked = d.wps_enabled !== false;
+    if ($('apWpsPin')) $('apWpsPin').checked = !!d.wps_pin_enabled;
+  }
+
+  async function saveWifiAp() {
+    const body = {
+      wifi_enabled: $('wifiEn').checked,
+      ssid: $('apSsid').value.trim(),
+      encryption_mode: $('apEnc').value,
+      password: $('apPwd').value,
+      hidden_ssid: $('apHidden').checked,
+      protocol: $('apProto').value,
+      bandwidth: $('apBw').value,
+      channel: $('apCh').value,
+      signal_strength: $('apSig').value,
+      wps_enabled: $('apWps').checked,
+      wps_pin_enabled: $('apWpsPin').checked,
+    };
+    await jfetch(API.wifiAp, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    toast('WiFi 配置已保存');
+  }
+
+  async function loadTraffic() {
+    const d = await jfetch(API.traffic, { method: 'GET' });
+    if ($('trafficEn')) $('trafficEn').checked = !!d.traffic_enabled;
+    if ($('trafficNote')) $('trafficNote').textContent = d.note || '';
+    if ($('headerTrafficToggle')) $('headerTrafficToggle').checked = !!d.traffic_enabled;
+  }
+
+  async function saveTraffic() {
+    await jfetch(API.traffic, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ traffic_enabled: $('trafficEn').checked }),
+    });
+    if ($('headerTrafficToggle')) $('headerTrafficToggle').checked = $('trafficEn').checked;
+    toast('已保存');
+  }
+
+  async function loadProbes() {
+    const d = await jfetch(API.probes, { method: 'GET' });
+    if ($('p1')) $('p1').value = d.detection_ip1 || '';
+    if ($('p2')) $('p2').value = d.detection_ip2 || '';
+    if ($('p3')) $('p3').value = d.detection_ip3 || '';
+    if ($('p4')) $('p4').value = d.detection_ip4 || '';
+  }
+
+  async function saveProbes() {
+    await jfetch(API.probes, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        detection_ip1: $('p1').value.trim(),
+        detection_ip2: $('p2').value.trim(),
+        detection_ip3: $('p3').value.trim(),
+        detection_ip4: $('p4').value.trim(),
+      }),
+    });
+    toast('探测地址已保存');
+  }
+
+  async function loadSysTime() {
+    const d = await jfetch(API.time, { method: 'GET' });
+    if ($('sysTimeDisp')) $('sysTimeDisp').value = d.system_time || '';
+    if ($('fwVerDisp')) $('fwVerDisp').value = d.firmware_version || '';
+    if ($('tzSelect') && d.timezone) {
+      const tz = $('tzSelect');
+      let found = false;
+      for (let i = 0; i < tz.options.length; i++) {
+        if (tz.options[i].value === d.timezone || tz.options[i].textContent.indexOf(d.timezone) >= 0) {
+          tz.selectedIndex = i;
+          found = true;
+          break;
+        }
       }
-      toast('已请求应用当前模式');
-      await fetchModeRuntimeOnly();
-      fetchOverview();
-    } catch (e) {
-      toast(`应用失败：${e && e.message ? e.message : '未知错误'}`, true);
+      if (!found) {
+        const o = document.createElement('option');
+        o.value = d.timezone;
+        o.textContent = d.timezone;
+        tz.appendChild(o);
+        tz.value = d.timezone;
+      }
     }
   }
 
-  async function fetchModeRuntimeOnly() {
+  async function saveSysTime() {
+    await jfetch(API.time, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ timezone: $('tzSelect').value }),
+    });
+    toast('时区已保存');
+  }
+
+  async function syncLocalTime() {
+    await jfetch(API.syncTime, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ local_timestamp_ms: Date.now() }),
+    });
+    toast('已同步本地时间');
+    loadSysTime();
+  }
+
+  async function loadLogs() {
+    const d = await jfetch(API.logs, { method: 'GET' });
+    const logs = Array.isArray(d.logs) ? d.logs : [];
+    if ($('logView')) $('logView').textContent = logs.join('\n') || '(无)';
+  }
+
+  async function clearLogs() {
+    await jfetch(API.logs, { method: 'DELETE' });
+    toast('日志已清空');
+    loadLogs();
+  }
+
+  async function savePwd() {
+    const a = $('pwdNew').value;
+    const b = $('pwdNew2').value;
+    if (a !== b) {
+      toast('两次新密码不一致', true);
+      return;
+    }
+    await jfetch(API.password, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        old_password: $('pwdOld').value,
+        new_password: a,
+      }),
+    });
+    toast('密码已更新');
+  }
+
+  async function doFactory() {
+    if (!window.confirm('确定恢复出厂？将清除 NVS 中的配置。')) return;
+    await jfetch(API.factory, { method: 'POST' });
+    toast('已执行复位，请重启设备');
+  }
+
+  async function exportCfg() {
+    const d = await jfetch(API.cfgExport, { method: 'GET' });
+    const blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'router-config.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('已下载备份');
+  }
+
+  async function importCfg() {
+    const txt = $('importCfgText').value.trim();
+    if (!txt) {
+      toast('请粘贴 JSON', true);
+      return;
+    }
+    const obj = JSON.parse(txt);
+    await jfetch(API.cfgImport, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(obj),
+    });
+    toast('导入成功');
+  }
+
+  async function loadRebootSched() {
+    const d = await jfetch(API.rbSched, { method: 'GET' });
+    if ($('schEn')) $('schEn').checked = !!d.enabled;
+    if ($('schH')) $('schH').value = d.hour != null ? d.hour : 3;
+    if ($('schM')) $('schM').value = d.minute != null ? d.minute : 30;
+  }
+
+  async function saveRebootSched() {
+    await jfetch(API.rbSched, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled: $('schEn').checked,
+        hour: parseInt($('schH').value, 10),
+        minute: parseInt($('schM').value, 10),
+      }),
+    });
+    toast('定时重启已保存');
+  }
+
+  async function doReboot() {
+    if (!window.confirm('确定立即重启设备？')) return;
     try {
-      const res = await fetch(API.modeStatus, { method: 'GET' });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok) {
-        renderRuntimeStatus(data);
-      }
+      await fetch(API.reboot, { method: 'POST' });
     } catch (_) {}
+    toast('设备重启中…');
   }
 
-  function showView(name) {
-    const ov = $('viewOverview');
-    const st = $('viewSettings');
-    const t1 = $('tabOverview');
-    const t2 = $('tabSettings');
-    if (ov) ov.hidden = name !== 'overview';
-    if (st) st.hidden = name !== 'settings';
-    if (t1) t1.classList.toggle('active', name === 'overview');
-    if (t2) t2.classList.toggle('active', name === 'settings');
-
-    if (name === 'overview') {
-      fetchOverview();
-    } else {
-      fetchModeConfig();
+  function onNav(page) {
+    showPage(page);
+    const loaders = {
+      overview: loadOverview,
+      users: loadUsers,
+      blacklist: loadBlacklist,
+      network: loadNetworkForm,
+      apn: loadApn,
+      wifi: loadWifiAp,
+      traffic: loadTraffic,
+      password: null,
+      systime: loadSysTime,
+      upgrade: null,
+      logs: loadLogs,
+      probes: loadProbes,
+      reboot: loadRebootSched,
+      wizard: null,
+    };
+    const fn = loaders[page];
+    if (fn) {
+      fn().catch((e) => toast(e.message || String(e), true));
     }
   }
 
-  function bindNav() {
-    document.querySelectorAll('.nav-tab').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const v = btn.getAttribute('data-view');
-        if (v) showView(v);
-      });
-    });
-    const ref = $('overviewRefresh');
-    ref && ref.addEventListener('click', () => fetchOverview());
-    const sel = $('workModeSelect');
-    sel && sel.addEventListener('change', onWorkModeSelectChange);
-    const ms = $('modeSaveBtn');
-    ms && ms.addEventListener('click', onModeSaveClick);
-    const ma = $('modeApplyBtn');
-    ma && ma.addEventListener('click', onModeApplyOnlyClick);
-    const mr = $('modeStatusRefreshBtn');
-    mr && mr.addEventListener('click', () => fetchModeRuntimeOnly());
-  }
-
-  function bindSta() {
-    const scanBtn = $('wifiScanBtn');
-    const saveBtn = $('saveBtn');
-    const loadBtn = $('loadBtn');
-    const clearBtn = $('clearBtn');
-    const closeBtn = $('ssidListCloseBtn');
-
-    scanBtn && scanBtn.addEventListener('click', onScanClick);
-    saveBtn && saveBtn.addEventListener('click', onSaveClick);
-    loadBtn && loadBtn.addEventListener('click', onLoadClick);
-    clearBtn && clearBtn.addEventListener('click', onClearClick);
-    closeBtn && closeBtn.addEventListener('click', () => {
-      const box = $('availableSsidsBox');
-      if (box) box.style.display = 'none';
-    });
-
-    const local = loadFromLocalStorage();
-    if (local && (local.ssid || local.password)) {
-      setForm(local.ssid, local.password);
-      showSavedPreview(local.ssid, local.password);
-    }
-  }
-
-  function bindEthWan() {
-    const dhcp = $('ethWanDhcp');
-    dhcp && dhcp.addEventListener('change', onEthWanDhcpChange);
-
-    const save = $('ethWanSaveBtn');
-    save && save.addEventListener('click', async () => {
-      try {
-        await saveEthWanConfig();
-        toast('W5500 WAN 参数已保存到 NVS');
-        fetchOverview();
-      } catch (e) {
-        toast(`保存失败：${e && e.message ? e.message : '未知错误'}`, true);
-      }
-    });
-
-    const load = $('ethWanLoadBtn');
-    load && load.addEventListener('click', async () => {
-      try {
-        await fetchEthWanConfig();
-        toast('W5500 WAN 参数已从设备读取');
-      } catch (e) {
-        toast(`读取失败：${e && e.message ? e.message : '未知错误'}`, true);
-      }
-    });
-
-    const clear = $('ethWanClearBtn');
-    clear && clear.addEventListener('click', async () => {
-      try {
-        await clearEthWanConfig();
-        setEthWanForm({ dhcp: true, ip: '', mask: '', gw: '', dns1: '', dns2: '' });
-        toast('W5500 WAN 参数已清空');
-        fetchOverview();
-      } catch (e) {
-        toast(`清空失败：${e && e.message ? e.message : '未知错误'}`, true);
-      }
-    });
-  }
-
-  document.addEventListener('DOMContentLoaded', () => {
-    bindNav();
-    bindSta();
-    bindEthWan();
-    showView('overview');
+  document.querySelectorAll('.nav-item[data-page]').forEach((btn) => {
+    btn.addEventListener('click', () => onNav(btn.getAttribute('data-page')));
   });
+
+  document.querySelectorAll('[data-goto]').forEach((btn) => {
+    btn.addEventListener('click', () => onNav(btn.getAttribute('data-goto')));
+  });
+
+  document.querySelectorAll('.nav-group-title[data-toggle]').forEach((t) => {
+    t.addEventListener('click', () => {
+      const id = t.getAttribute('data-toggle');
+      const el = document.getElementById(id);
+      if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+    });
+  });
+
+  $('btnRefreshOverview') && $('btnRefreshOverview').addEventListener('click', () => loadOverview().catch((e) => toast(e.message, true)));
+  $('btnRefreshUsers') && $('btnRefreshUsers').addEventListener('click', () => loadUsers().catch((e) => toast(e.message, true)));
+  $('btnSaveNetwork') && $('btnSaveNetwork').addEventListener('click', () => saveNetwork().catch((e) => toast(e.message, true)));
+  $('workingMode') && $('workingMode').addEventListener('change', toggleStaPanel);
+  $('btnSaveSta') && $('btnSaveSta').addEventListener('click', () => saveSta().catch((e) => toast(e.message, true)));
+  $('btnLoadSta') && $('btnLoadSta').addEventListener('click', () => loadSta().catch((e) => toast(e.message, true)));
+  $('btnScanSta') && $('btnScanSta').addEventListener('click', () => scanSta().catch((e) => toast(e.message, true)));
+  $('btnClearSta') && $('btnClearSta').addEventListener('click', () => clearSta().catch((e) => toast(e.message, true)));
+
+  $('btnSaveApn') && $('btnSaveApn').addEventListener('click', () => saveApn().catch((e) => toast(e.message, true)));
+  $('btnSaveWifi') && $('btnSaveWifi').addEventListener('click', () => saveWifiAp().catch((e) => toast(e.message, true)));
+  $('btnSaveTraffic') && $('btnSaveTraffic').addEventListener('click', () => saveTraffic().catch((e) => toast(e.message, true)));
+  $('headerTrafficToggle') &&
+    $('headerTrafficToggle').addEventListener('change', () => {
+      if ($('trafficEn')) $('trafficEn').checked = $('headerTrafficToggle').checked;
+      saveTraffic().catch((e) => toast(e.message, true));
+    });
+
+  $('btnSavePwd') && $('btnSavePwd').addEventListener('click', () => savePwd().catch((e) => toast(e.message, true)));
+  $('btnSaveTime') && $('btnSaveTime').addEventListener('click', () => saveSysTime().catch((e) => toast(e.message, true)));
+  $('btnSyncLocal') && $('btnSyncLocal').addEventListener('click', () => syncLocalTime().catch((e) => toast(e.message, true)));
+  $('btnRefreshLogs') && $('btnRefreshLogs').addEventListener('click', () => loadLogs().catch((e) => toast(e.message, true)));
+  $('btnClearLogs') && $('btnClearLogs').addEventListener('click', () => clearLogs().catch((e) => toast(e.message, true)));
+  $('btnSaveProbes') && $('btnSaveProbes').addEventListener('click', () => saveProbes().catch((e) => toast(e.message, true)));
+  $('btnRebootNow') && $('btnRebootNow').addEventListener('click', () => doReboot());
+  $('btnSaveSchedule') && $('btnSaveSchedule').addEventListener('click', () => saveRebootSched().catch((e) => toast(e.message, true)));
+  $('btnFactory') && $('btnFactory').addEventListener('click', () => doFactory().catch((e) => toast(e.message, true)));
+  $('btnExportCfg') && $('btnExportCfg').addEventListener('click', () => exportCfg().catch((e) => toast(e.message, true)));
+  $('btnImportCfg') &&
+    $('btnImportCfg').addEventListener('click', () => importCfg().catch((e) => toast(e.message, true)));
+  $('btnLogout') &&
+    $('btnLogout').addEventListener('click', () => {
+      toast('本地页面无会话，关闭浏览器即可。');
+    });
+
+  showPage('overview');
+  loadOverview().catch(() => {});
+  loadTraffic().catch(() => {});
 })();
