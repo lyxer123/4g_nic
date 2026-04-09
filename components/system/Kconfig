@@ -20,10 +20,21 @@ menu "System options"
             TinyUSB or another USB stack on the same OTG port.
 
     config SYSTEM_USB_CAT1_ENUM_TIMEOUT_MS
-        int "USB modem probe enumeration timeout (ms)"
+        int "USB modem probe: minimum duration per round (ms)"
         default 10000
         depends on SYSTEM_USB_CAT1_DETECT
         range 500 30000
+        help
+          Each probe round runs for at least this long unless a matching modem is found earlier.
+          Worst-case time is approximately SYSTEM_USB_CAT1_PROBE_ROUNDS times this value.
+
+    config SYSTEM_USB_CAT1_PROBE_ROUNDS
+        int "USB modem probe: number of rounds before giving up"
+        default 3
+        depends on SYSTEM_USB_CAT1_DETECT
+        range 1 8
+        help
+          After each full round (ENUM_TIMEOUT_MS), starts another if not yet successful. Stops immediately when accepted.
 
     config SYSTEM_USB_CAT1_ENABLE_GPIO
         int "Cat1 modem power/enable GPIO (-1 = unused)"
@@ -64,7 +75,7 @@ menu "System options"
         default n
         depends on SYSTEM_USB_CAT1_DETECT
         help
-            If y, a composite CDC modem without a listed VID/PID may be reported as present. Prefer fixing VID/PID table.
+          If y, a composite CDC modem without a listed VID/PID may be reported as present. Prefer fixing VID/PID table.
 
     config SYSTEM_ETH_WAN_USE_STATIC_IP
         bool "ETH_WAN use static IPv4 (skip DHCP)"

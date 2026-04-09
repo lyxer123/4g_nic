@@ -66,11 +66,8 @@ void system_bridge_init_netifs_from_hw(void)
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0)
 #if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM)
-    if (system_usb_cat1_detect_present()) {
-        esp_bridge_create_modem_netif(NULL, NULL, false, false);
-    } else {
-        ESP_LOGI(TAG, "skip modem PPP: USB Cat.1 not detected");
-    }
+    /* Modem PPP netif is independent of boot USB Cat.1 enumeration; esp_modem attaches when device appears. */
+    esp_bridge_create_modem_netif(NULL, NULL, false, false);
 #endif
 #endif
 

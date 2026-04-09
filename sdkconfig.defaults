@@ -60,6 +60,7 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=5120
 CONFIG_SYSTEM_USB_CAT1_DETECT=y
 # Many Cat1 modules enumerate after USB reset + power ramp; 4s is often too short.
 CONFIG_SYSTEM_USB_CAT1_ENUM_TIMEOUT_MS=10000
+CONFIG_SYSTEM_USB_CAT1_PROBE_ROUNDS=3
 # Board: GPIO21 drives modem EN (power on). Set -1 if module is always powered.
 CONFIG_SYSTEM_USB_CAT1_ENABLE_GPIO=21
 CONFIG_SYSTEM_USB_CAT1_ENABLE_ACTIVE_HIGH=y
@@ -70,7 +71,7 @@ CONFIG_SYSTEM_HW_DETECT_W5500=y
 
 # ESP-IoT-Bridge: "external network" / "data forwarding" menus are compile-time. This file pins one
 # firmware capability set; per-board WAN/LAN choice is not required in menuconfig. Netifs are
-# created according to W5500 + USB Cat.1 probes. NVS empty -> mode_mgr uses HW default (modes 1/3/10/11).
+# created according to HW probes (W5500); USB modem netif is always created when MODEM=y. NVS empty -> mode_mgr uses HW default (modes 1/3/10/11).
 CONFIG_BRIDGE_EXTERNAL_NETIF_STATION=y
 CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM=y
 # CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET is not set

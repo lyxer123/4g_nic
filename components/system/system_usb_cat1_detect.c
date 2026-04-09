@@ -207,10 +207,18 @@ esp_err_t system_usb_cat1_detect_run(void)
     usb_seen_reset();
     memset(&s_evt, 0, sizeof(s_evt));
 
+#if CONFIG_SYSTEM_USB_CAT1_ENABLE_GPIO >= 0 && defined(CONFIG_MODEM_RESET_GPIO) && \
+    CONFIG_MODEM_RESET_GPIO == CONFIG_SYSTEM_USB_CAT1_ENABLE_GPIO
+    ESP_LOGW(TAG,
+             "MODEM_RESET_GPIO == USB_CAT1_ENABLE_GPIO (%d): same pin drives boot probe + IoT-Bridge reset; "
+             "confirm schematic (power EN vs nRESET).",
+             CONFIG_SYSTEM_USB_CAT1_ENABLE_GPIO);
+#endif
+
     cat1_assert_enable_gpio();
 
-    /* PHY + root hub are initialized here (ESP-IDF usb_host). This is unrelated to IoT-Bridge:
-     * CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM only gates esp_bridge_create_modem_netif() (esp_modem DTE).
+    /* PHY + root hub are initialized here (ESP-IDF usb_host). Boot probe is for logs/UI only;
+     * esp_bridge_create_modem_netif() is not skipped when probe fails (see system_bridge_runtime.c).
      * CONFIG_BRIDGE_DATA_FORWARDING_NETIF_USB gates TinyUSB *device* stack in bridge_usb.c.
      * Neither runs before this probe (see app_main: probe runs before esp_bridge_create_all_netif()). */
     usb_host_config_t host_cfg = {
@@ -249,20 +257,31 @@ esp_err_t system_usb_cat1_detect_run(void)
     /* Let VBUS / modem PHY settle after host install (many Cat1 need > reset recovery time). */
     vTaskDelay(pdMS_TO_TICKS(150));
 
-    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(CONFIG_SYSTEM_USB_CAT1_ENUM_TIMEOUT_MS);
-
-    while (xTaskGetTickCount() < deadline) {
-        uint32_t fl = 0;
-        (void)usb_host_lib_handle_events(pdMS_TO_TICKS(30), &fl);
-        (void)usb_host_client_handle_events(client, pdMS_TO_TICKS(30));
-
-        /* Always scan: lib_info num_devices can lag behind the address list after connect events. */
-        (void)probe_devices(client);
-        if (s_present) {
-            break;
-        }
-        if (s_evt.new_dev) {
+    for (int round = 0; round < CONFIG_SYSTEM_USB_CAT1_PROBE_ROUNDS && !s_present; round++) {
+        if (round > 0) {
+            ESP_LOGI(TAG, "USB Cat1 probe round %d/%d (>= %d ms per round unless matched earlier)",
+                     round + 1, CONFIG_SYSTEM_USB_CAT1_PROBE_ROUNDS, CONFIG_SYSTEM_USB_CAT1_ENUM_TIMEOUT_MS);
             s_evt.new_dev = false;
+        }
+
+        const TickType_t round_deadline =
+            xTaskGetTickCount() + pdMS_TO_TICKS(CONFIG_SYSTEM_USB_CAT1_ENUM_TIMEOUT_MS);
+
+        while (xTaskGetTickCount() < round_deadline && !s_present) {
+            uint32_t fl = 0;
+            (void)usb_host_lib_handle_events(pdMS_TO_TICKS(30), &fl);
+            (void)usb_host_client_handle_events(client, pdMS_TO_TICKS(30));
+
+            /* Always scan: lib_info num_devices can lag behind the address list after connect events. */
+            (void)probe_devices(client);
+            if (s_evt.new_dev) {
+                s_evt.new_dev = false;
+            }
+        }
+
+        if (s_present) {
+            ESP_LOGI(TAG, "USB Cat1 probe succeeded on round %d/%d", round + 1,
+                     CONFIG_SYSTEM_USB_CAT1_PROBE_ROUNDS);
         }
     }
 
@@ -278,10 +297,10 @@ esp_err_t system_usb_cat1_detect_run(void)
                 lib_ndev = finfo.num_devices;
             }
             ESP_LOGW(TAG,
-                     "No USB device opened in %d ms (host lib num_devices=%d). Check USB OTG D+/D-/VBUS/GND; "
-                     "slow Cat1: increase CONFIG_SYSTEM_USB_CAT1_ENUM_TIMEOUT_MS; same PHY cannot run TinyUSB "
-                     "device stack together with usb_host.",
-                     CONFIG_SYSTEM_USB_CAT1_ENUM_TIMEOUT_MS, lib_ndev);
+                     "No USB device opened after %d round(s), %d ms/round (host lib num_devices=%d). "
+                     "Check USB OTG D+/D-/VBUS/GND; USB Cat1: increase ENUM_TIMEOUT_MS or PROBE_ROUNDS; "
+                     "same PHY cannot run TinyUSB device stack together with usb_host.",
+                     CONFIG_SYSTEM_USB_CAT1_PROBE_ROUNDS, CONFIG_SYSTEM_USB_CAT1_ENUM_TIMEOUT_MS, lib_ndev);
         } else {
             char line[128];
             int pos = snprintf(line, sizeof(line), "USB enumerated %d device(s), none matched Cat1 whitelist: ", s_seen_n);
