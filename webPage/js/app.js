@@ -508,8 +508,51 @@
     toast('设备重启中…');
   }
 
+  function isMobileLayout() {
+    return window.matchMedia('(max-width: 899px)').matches;
+  }
+
+  function setSidebarOpen(open) {
+    document.body.classList.toggle('sidebar-open', !!open);
+    const bt = $('menuToggle');
+    const bd = $('sidebarBackdrop');
+    if (bt) {
+      bt.setAttribute('aria-expanded', open ? 'true' : 'false');
+      bt.setAttribute('aria-label', open ? '关闭导航菜单' : '打开导航菜单');
+    }
+    if (bd) {
+      bd.setAttribute('aria-hidden', open ? 'false' : 'true');
+    }
+  }
+
+  function closeSidebarMobile() {
+    if (isMobileLayout()) {
+      setSidebarOpen(false);
+    }
+  }
+
+  function toggleSidebarMobile() {
+    if (!isMobileLayout()) {
+      return;
+    }
+    setSidebarOpen(!document.body.classList.contains('sidebar-open'));
+  }
+
+  function debounce(fn, ms) {
+    let t = null;
+    return function () {
+      clearTimeout(t);
+      const a = arguments;
+      const self = this;
+      t = setTimeout(function () {
+        fn.apply(self, a);
+      }, ms);
+    };
+  }
+
   function onNav(page) {
     showPage(page);
+    closeSidebarMobile();
     const loaders = {
       overview: loadOverview,
       users: loadUsers,
@@ -531,6 +574,31 @@
       fn().catch((e) => toast(e.message || String(e), true));
     }
   }
+
+  $('menuToggle') &&
+    $('menuToggle').addEventListener('click', () => {
+      toggleSidebarMobile();
+    });
+
+  $('sidebarBackdrop') &&
+    $('sidebarBackdrop').addEventListener('click', () => {
+      closeSidebarMobile();
+    });
+
+  window.addEventListener(
+    'resize',
+    debounce(function () {
+      if (!isMobileLayout()) {
+        setSidebarOpen(false);
+      }
+    }, 150)
+  );
+
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') {
+      closeSidebarMobile();
+    }
+  });
 
   document.querySelectorAll('.nav-item[data-page]').forEach((btn) => {
     btn.addEventListener('click', () => onNav(btn.getAttribute('data-page')));

@@ -2,14 +2,17 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#1a3a5c" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>设备管理平台</title>
   <link rel="icon" href="data:," />
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
+  <div class="sidebar-backdrop" id="sidebarBackdrop" aria-hidden="true"></div>
   <div class="app">
-    <aside class="sidebar">
+    <aside class="sidebar" id="sidebar">
       <div class="sidebar-brand">设备管理平台</div>
       <nav class="sidebar-nav" id="sidebarNav">
         <div class="nav-group">
@@ -58,7 +61,12 @@
 
     <div class="main-wrap">
       <header class="topbar">
-        <h1 class="page-title" id="pageTitle">总览</h1>
+        <div class="topbar-left">
+          <button type="button" class="menu-toggle" id="menuToggle" aria-label="打开导航菜单" aria-expanded="false" aria-controls="sidebar">
+            <span class="menu-toggle-bars" aria-hidden="true"><span></span><span></span><span></span></span>
+          </button>
+          <h1 class="page-title" id="pageTitle">总览</h1>
+        </div>
         <div class="topbar-actions">
           <label class="traffic-toggle" title="流量开关">
             <input type="checkbox" id="headerTrafficToggle" />
