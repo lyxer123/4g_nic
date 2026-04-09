@@ -23,6 +23,7 @@
     cfgExport: '/api/system/config/export',
     cfgImport: '/api/system/config/import',
     usersOnline: '/api/users/online',
+    login: '/api/system/login',
   };
 
   function $(id) {
@@ -77,6 +78,33 @@
     return d.innerHTML;
   }
 
+  function setAuthUi(loggedIn) {
+    const loginPage = $('loginPage');
+    const appRoot = $('appRoot');
+    if (loginPage) loginPage.classList.toggle('hidden', !!loggedIn);
+    if (appRoot) appRoot.classList.toggle('hidden', !loggedIn);
+  }
+
+  async function doLogin(ev) {
+    if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+    const username = $('loginUser') ? $('loginUser').value.trim() : '';
+    const password = $('loginPass') ? $('loginPass').value : '';
+    if ($('loginErr')) $('loginErr').textContent = '';
+    await jfetch(API.login, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    setAuthUi(true);
+    showPage('overview');
+    loadOverview().catch(() => {});
+  }
+
+  function doLogout() {
+    setAuthUi(false);
+    if ($('loginPass')) $('loginPass').value = '';
+  }
+
   function ifaceLooksUp(x) {
     if (!x) return false;
     if (x.up === true) return true;
@@ -114,6 +142,10 @@
       el.innerHTML = rows.map(([a, b]) => '<dt>' + esc(a) + '</dt><dd>' + esc(b) + '</dd>').join('');
     }
     const cell = d.cellular || {};
+    const cardCell = $('cardCell');
+    if (cardCell) {
+      cardCell.classList.toggle('hidden', !cell.usb_lte_ready);
+    }
     const cr = [
       ['运营商', cell.operator || '—'],
       ['网络模式', cell.network_mode || '—'],
@@ -862,8 +894,19 @@
     $('btnImportCfg').addEventListener('click', () => importCfg().catch((e) => toast(e.message, true)));
   $('btnLogout') &&
     $('btnLogout').addEventListener('click', () => {
-      toast('本地页面无会话，关闭浏览器即可。');
+      doLogout();
     });
+  $('loginForm') &&
+    $('loginForm').addEventListener('submit', (e) =>
+      doLogin(e).catch((err) => {
+        const msg = err && err.message ? err.message : '登录失败';
+        if ($('loginErr')) {
+          $('loginErr').textContent = msg;
+        } else {
+          window.alert(msg);
+        }
+      })
+    );
 
   const LS_SIDEBAR_COLLAPSED = 'sidebarCollapsed';
 
@@ -913,6 +956,5 @@
   window.addEventListener('resize', debounce(syncSidebarLayout, 150));
   syncSidebarLayout();
 
-  showPage('overview');
-  loadOverview().catch(() => {});
+  setAuthUi(false);
 })();

@@ -10,8 +10,26 @@
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
+  <div id="loginPage" class="login-page">
+    <div class="login-card">
+      <h2>设备管理平台</h2>
+      <p class="muted">请先登录后再配置网络</p>
+      <form id="loginForm" class="form-stack">
+        <div class="form-group">
+          <label for="loginUser">用户名</label>
+          <input class="input" id="loginUser" type="text" autocomplete="username" value="admin" />
+        </div>
+        <div class="form-group">
+          <label for="loginPass">密码</label>
+          <input class="input" id="loginPass" type="password" autocomplete="current-password" placeholder="默认 admin" />
+        </div>
+        <p id="loginErr" class="muted" style="color:#c0392b;min-height:1.2em;"></p>
+        <button type="submit" class="btn btn-primary">登录</button>
+      </form>
+    </div>
+  </div>
   <div class="sidebar-backdrop" id="sidebarBackdrop" aria-hidden="true"></div>
-  <div class="app">
+  <div class="app hidden" id="appRoot">
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-top">
         <span class="sidebar-title">设备管理平台</span>
@@ -73,7 +91,7 @@
               <dl class="kv-grid" id="dashSystem"></dl>
             </div>
           </div>
-          <div class="card">
+          <div class="card" id="cardCell">
             <div class="card-header"><span class="card-icon">▣</span> 4G状态</div>
             <div class="card-body">
               <dl class="kv-grid" id="dashCell"></dl>

@@ -20,6 +20,9 @@
 #include "nvs.h"
 #include "esp_timer.h"
 #include "esp_system.h"
+#include "esp_flash.h"
+#include "esp_psram.h"
+#include "esp_chip_info.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "system_w5500_detect.h"
@@ -1246,7 +1249,16 @@ static esp_err_t uri_dashboard_overview_get(httpd_req_t *req)
     const system_mode_profile_t *prof = system_mode_manager_get_profile(mode);
     cJSON_AddStringToObject(sys, "system_mode", prof && prof->label ? prof->label : "—");
     cJSON_AddStringToObject(sys, "firmware_version", WEB_UI_FW_VERSION);
-    cJSON_AddStringToObject(sys, "model", "4G_NIC");
+    esp_chip_info_t chip_info;
+    esp_chip_info(&chip_info);
+    uint32_t flash_size = 0;
+    esp_flash_get_size(NULL, &flash_size);
+    size_t psram_size = esp_psram_get_size();
+
+    char model_str[128];
+    snprintf(model_str, sizeof(model_str), "4G_NIC (%s Flash: %uMB, PSRAM: %uMB)",
+             CONFIG_IDF_TARGET, flash_size / (1024 * 1024), psram_size / (1024 * 1024));
+    cJSON_AddStringToObject(sys, "model", model_str);
     size_t total = heap_caps_get_total_size(MALLOC_CAP_DEFAULT);
     size_t freeb = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
     int mem_pct = (total > 0) ? (int)((total - freeb) * 100 / total) : 0;
@@ -2026,6 +2038,43 @@ static esp_err_t uri_system_logs_delete(httpd_req_t *req)
     return send_json(req, 200, "{\"status\":\"success\"}");
 }
 
+static esp_err_t uri_system_login_post(httpd_req_t *req)
+{
+    char *body = http_recv_body(req, 256);
+    if (!body) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
+    }
+    cJSON *root = cJSON_Parse(body);
+    free(body);
+    if (!root) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
+    }
+    cJSON *u = cJSON_GetObjectItem(root, "username");
+    cJSON *p = cJSON_GetObjectItem(root, "password");
+    if (!cJSON_IsString(u) || !cJSON_IsString(p)) {
+        cJSON_Delete(root);
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"username/password required\"}");
+    }
+
+    char admin_pwd[68] = {0};
+    nvs_handle_t h = 0;
+    if (nvs_open(NVS_NS_WEBUI, NVS_READONLY, &h) == ESP_OK) {
+        size_t n = sizeof(admin_pwd);
+        nvs_get_str(h, NVS_KEY_ADMIN, admin_pwd, &n);
+        nvs_close(h);
+    }
+    if (admin_pwd[0] == '\0') {
+        strlcpy(admin_pwd, "admin", sizeof(admin_pwd));
+    }
+
+    const bool ok = (strcmp(u->valuestring, "admin") == 0) && (strcmp(p->valuestring, admin_pwd) == 0);
+    cJSON_Delete(root);
+    if (!ok) {
+        return send_json(req, 401, "{\"status\":\"error\",\"message\":\"用户名或密码错误\"}");
+    }
+    return send_json(req, 200, "{\"status\":\"success\"}");
+}
+
 static esp_err_t uri_system_password_post(httpd_req_t *req)
 {
     char *body = http_recv_body(req, 384);
@@ -2386,6 +2435,9 @@ static esp_err_t register_handlers(httpd_handle_t server)
 
     httpd_uri_t logs_d = {.uri = "/api/system/logs", .method = HTTP_DELETE, .handler = uri_system_logs_delete};
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &logs_d), TAG, "register logs del failed");
+
+    httpd_uri_t login_p = {.uri = "/api/system/login", .method = HTTP_POST, .handler = uri_system_login_post};
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &login_p), TAG, "register login failed");
 
     httpd_uri_t pwd_p = {.uri = "/api/system/password", .method = HTTP_POST, .handler = uri_system_password_post};
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &pwd_p), TAG, "register pwd failed");

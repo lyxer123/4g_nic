@@ -38,6 +38,28 @@ body {
   min-height: 100dvh;
 }
 
+.login-page {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.login-card {
+  width: min(440px, 100%);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+  padding: 1.25rem;
+}
+
+.login-card h2 {
+  margin-bottom: 0.2rem;
+}
+
 body.sidebar-open {
   overflow: hidden;
   touch-action: none;
@@ -793,6 +815,9 @@ body.sidebar-open .sidebar {
 .section-divider {
   border: 0;
   border-top: 1px solid var(--border);
+  width: 48%;
+  min-width: 180px;
+  max-width: 320px;
   margin: 0.65rem 0;
 }
 
@@ -912,4 +937,8 @@ body.sidebar-open .sidebar {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
+}
+
+.hidden {
+  display: none !important;
 }
