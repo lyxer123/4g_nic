@@ -938,7 +938,3 @@ body.sidebar-open .sidebar {
   align-items: center;
   gap: 0.35rem;
 }
-
-.hidden {
-  display: none !important;
-}

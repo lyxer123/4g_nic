@@ -142,10 +142,6 @@
       el.innerHTML = rows.map(([a, b]) => '<dt>' + esc(a) + '</dt><dd>' + esc(b) + '</dd>').join('');
     }
     const cell = d.cellular || {};
-    const cardCell = $('cardCell');
-    if (cardCell) {
-      cardCell.classList.toggle('hidden', !cell.usb_lte_ready);
-    }
     const cr = [
       ['运营商', cell.operator || '—'],
       ['网络模式', cell.network_mode || '—'],

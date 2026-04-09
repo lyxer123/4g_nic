@@ -1,6 +1,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -20,8 +21,6 @@
 #include "nvs.h"
 #include "esp_timer.h"
 #include "esp_system.h"
-#include "esp_flash.h"
-#include "esp_psram.h"
 #include "esp_chip_info.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -64,6 +63,72 @@ static void log_ring_fmt(const char *fmt, ...)
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     log_ring_append(buf);
+}
+
+/*
+ * Applying Wi-Fi / work_mode inside the HTTP handler tears down SoftAP or STA before
+ * the response is sent (LWIP errno 113, "uri handler execution failed"). Defer a few
+ * hundred ms so the browser gets JSON and can show toast / reconnect.
+ */
+#define WEB_DEFER_APPLY_MS 450
+
+typedef struct {
+    uint8_t mode;
+} deferred_mode_apply_t;
+
+static void deferred_mode_apply_task(void *arg)
+{
+    deferred_mode_apply_t *d = (deferred_mode_apply_t *)arg;
+    const uint8_t m = d->mode;
+    free(d);
+    vTaskDelay(pdMS_TO_TICKS(WEB_DEFER_APPLY_MS));
+    esp_err_t e = system_mode_manager_apply(m);
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "deferred system_mode_manager_apply(%u): %s", (unsigned)m, esp_err_to_name(e));
+    } else {
+        ESP_LOGI(TAG, "deferred system_mode_manager_apply ok mode=%u", (unsigned)m);
+    }
+    vTaskDelete(NULL);
+}
+
+static void schedule_deferred_mode_apply(uint8_t mode)
+{
+    deferred_mode_apply_t *d = malloc(sizeof(*d));
+    if (!d) {
+        ESP_LOGW(TAG, "schedule_deferred_mode_apply: oom");
+        return;
+    }
+    d->mode = mode;
+    if (xTaskCreate(deferred_mode_apply_task, "web_mode_apply", 6144, d, tskIDLE_PRIORITY + 3, NULL) != pdPASS) {
+        free(d);
+        ESP_LOGW(TAG, "schedule_deferred_mode_apply: xTaskCreate failed");
+    }
+}
+
+static void deferred_wifi_ap_set_task(void *arg)
+{
+    wifi_config_t *cfg = (wifi_config_t *)arg;
+    vTaskDelay(pdMS_TO_TICKS(WEB_DEFER_APPLY_MS));
+    esp_err_t werr = esp_wifi_set_config(WIFI_IF_AP, cfg);
+    if (werr != ESP_OK) {
+        ESP_LOGW(TAG, "deferred esp_wifi_set_config(AP): %s", esp_err_to_name(werr));
+    }
+    free(cfg);
+    vTaskDelete(NULL);
+}
+
+static void schedule_deferred_wifi_ap_set(const wifi_config_t *wcfg)
+{
+    wifi_config_t *cpy = malloc(sizeof(*cpy));
+    if (!cpy) {
+        ESP_LOGW(TAG, "schedule_deferred_wifi_ap_set: oom");
+        return;
+    }
+    memcpy(cpy, wcfg, sizeof(*cpy));
+    if (xTaskCreate(deferred_wifi_ap_set_task, "web_ap_set", 4096, cpy, tskIDLE_PRIORITY + 3, NULL) != pdPASS) {
+        free(cpy);
+        ESP_LOGW(TAG, "schedule_deferred_wifi_ap_set: xTaskCreate failed");
+    }
 }
 
 #define NVS_NS_UI      "bridge_ui"
@@ -960,12 +1025,8 @@ static esp_err_t uri_mode_post(httpd_req_t *req)
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"nvs save failed\"}");
     }
 
-    ret = system_mode_manager_apply(m);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "mode saved but apply failed: %s", esp_err_to_name(ret));
-        return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"Saved to NVS. Apply failed now; reboot will re-apply.\"}");
-    }
-    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"Saved to NVS and applied at runtime.\"}");
+    schedule_deferred_mode_apply(m);
+    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"已写入 NVS，将在应答完成后自动应用（请稍候重连 WiFi）。\"}");
 }
 
 static esp_err_t uri_mode_apply_post(httpd_req_t *req)
@@ -1004,13 +1065,8 @@ static esp_err_t uri_mode_apply_post(httpd_req_t *req)
     if (!system_mode_manager_get_profile(m)) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"unknown mode\"}");
     }
-    esp_err_t e = system_mode_manager_apply(m);
-    if (e != ESP_OK) {
-        char out[160];
-        snprintf(out, sizeof(out), "{\"status\":\"error\",\"message\":\"apply failed: %s\"}", esp_err_to_name(e));
-        return send_json(req, 400, out);
-    }
-    return send_json(req, 200, "{\"status\":\"success\"}");
+    schedule_deferred_mode_apply(m);
+    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"将在应答完成后应用当前模式。\"}");
 }
 
 static esp_err_t uri_mode_status_get(httpd_req_t *req)
@@ -1236,6 +1292,70 @@ static const char *auth_to_enc_str(wifi_auth_mode_t a)
     }
 }
 
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+/** Rolling CPU% from FreeRTOS run-time stats (idle task time vs global counter). */
+static int dashboard_cpu_load_percent(void)
+{
+    UBaseType_t n = uxTaskGetNumberOfTasks();
+    if (n == 0) {
+        return -1;
+    }
+    TaskStatus_t *arr = calloc(n, sizeof(TaskStatus_t));
+    if (!arr) {
+        return -1;
+    }
+    configRUN_TIME_COUNTER_TYPE ul_total = 0;
+    UBaseType_t ntasks = uxTaskGetSystemState(arr, n, &ul_total);
+    (void)ntasks;
+
+    configRUN_TIME_COUNTER_TYPE idle_sum = 0;
+    for (UBaseType_t i = 0; i < n; i++) {
+#if portNUM_PROCESSORS > 1
+        for (BaseType_t c = 0; c < (BaseType_t)portNUM_PROCESSORS; c++) {
+            if (arr[i].xHandle == xTaskGetIdleTaskHandleForCPU(c)) {
+                idle_sum += arr[i].ulRunTimeCounter;
+                break;
+            }
+        }
+#else
+        if (arr[i].xHandle == xTaskGetIdleTaskHandle()) {
+            idle_sum += arr[i].ulRunTimeCounter;
+        }
+#endif
+    }
+    free(arr);
+
+    static configRUN_TIME_COUNTER_TYPE s_prev_rt_total;
+    static configRUN_TIME_COUNTER_TYPE s_prev_idle_sum;
+    static bool s_have_prev;
+
+    if (!s_have_prev) {
+        s_prev_rt_total = ul_total;
+        s_prev_idle_sum = idle_sum;
+        s_have_prev = true;
+        return 0;
+    }
+
+    configRUN_TIME_COUNTER_TYPE d_total = ul_total - s_prev_rt_total;
+    configRUN_TIME_COUNTER_TYPE d_idle = idle_sum - s_prev_idle_sum;
+    s_prev_rt_total = ul_total;
+    s_prev_idle_sum = idle_sum;
+    if (d_total == 0) {
+        return 0;
+    }
+
+    uint64_t idle_pct = ((uint64_t)d_idle * 100ULL) / ((uint64_t)d_total * (uint64_t)portNUM_PROCESSORS);
+    int cpu = (int)(100 - idle_pct);
+    if (cpu < 0) {
+        cpu = 0;
+    }
+    if (cpu > 100) {
+        cpu = 100;
+    }
+    return cpu;
+}
+#endif
+
 static esp_err_t uri_dashboard_overview_get(httpd_req_t *req)
 {
     cJSON *root = cJSON_CreateObject();
@@ -1251,19 +1371,26 @@ static esp_err_t uri_dashboard_overview_get(httpd_req_t *req)
     cJSON_AddStringToObject(sys, "firmware_version", WEB_UI_FW_VERSION);
     esp_chip_info_t chip_info;
     esp_chip_info(&chip_info);
-    uint32_t flash_size = 0;
-    esp_flash_get_size(NULL, &flash_size);
-    size_t psram_size = esp_psram_get_size();
-
-    char model_str[128];
-    snprintf(model_str, sizeof(model_str), "4G_NIC (%s Flash: %uMB, PSRAM: %uMB)",
-             CONFIG_IDF_TARGET, flash_size / (1024 * 1024), psram_size / (1024 * 1024));
+    char model_str[80];
+    snprintf(model_str, sizeof(model_str), "4G_NIC (%s, %u cores)",
+             CONFIG_IDF_TARGET, (unsigned)chip_info.cores);
     cJSON_AddStringToObject(sys, "model", model_str);
     size_t total = heap_caps_get_total_size(MALLOC_CAP_DEFAULT);
     size_t freeb = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
     int mem_pct = (total > 0) ? (int)((total - freeb) * 100 / total) : 0;
     cJSON_AddNumberToObject(sys, "memory_percent", mem_pct);
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+    {
+        int cpu = dashboard_cpu_load_percent();
+        if (cpu < 0) {
+            cJSON_AddNullToObject(sys, "cpu_percent");
+        } else {
+            cJSON_AddNumberToObject(sys, "cpu_percent", cpu);
+        }
+    }
+#else
     cJSON_AddNullToObject(sys, "cpu_percent");
+#endif
     time_t now = time(NULL);
     struct tm tm_info;
     localtime_r(&now, &tm_info);
@@ -1460,7 +1587,7 @@ static esp_err_t uri_network_config_post(httpd_req_t *req)
             cJSON_Delete(root);
             return send_json(req, 400, "{\"status\":\"error\",\"message\":\"nvs save work_mode failed\"}");
         }
-        (void)system_mode_manager_apply(m);
+        schedule_deferred_mode_apply(m);
         nvs_handle_t hh = 0;
         if (nvs_open(NVS_NS_WEBUI, NVS_READWRITE, &hh) == ESP_OK) {
             const char *tag = working_mode_tag_from_id(m);
@@ -1483,7 +1610,7 @@ static esp_err_t uri_network_config_post(httpd_req_t *req)
             }
             uint8_t mid = pick_mode_for_ui_working_mode(wm->valuestring);
             save_work_mode_u8(mid);
-            system_mode_manager_apply(mid);
+            schedule_deferred_mode_apply(mid);
             nvs_handle_t wh = 0;
             if (nvs_open(NVS_NS_WEBUI, NVS_READWRITE, &wh) == ESP_OK) {
                 const system_mode_profile_t *pm = system_mode_manager_get_profile(mid);
@@ -1731,12 +1858,6 @@ static esp_err_t uri_wifi_ap_post(httpd_req_t *req)
     }
     wcfg.ap.max_connection = 8;
 
-    esp_err_t werr = esp_wifi_set_config(WIFI_IF_AP, &wcfg);
-    if (werr != ESP_OK) {
-        cJSON_Delete(root);
-        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"wifi ap set failed\"}");
-    }
-
     cJSON *extra = cJSON_CreateObject();
     cJSON *p = cJSON_GetObjectItem(root, "protocol");
     if (cJSON_IsString(p)) {
@@ -1774,8 +1895,9 @@ static esp_err_t uri_wifi_ap_post(httpd_req_t *req)
         free(exs);
     }
     cJSON_Delete(root);
-    log_ring_fmt("[WIFI] SoftAP config updated");
-    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"SoftAP 参数已写入；部分终端可能需重连。\"}");
+    schedule_deferred_wifi_ap_set(&wcfg);
+    log_ring_fmt("[WIFI] SoftAP config scheduled (deferred)");
+    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"SoftAP 已排队应用，终端可能短暂断开后自动重连。\"}");
 }
 
 static esp_err_t uri_system_probes_get(httpd_req_t *req)
