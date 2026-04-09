@@ -13,14 +13,17 @@
   <div class="sidebar-backdrop" id="sidebarBackdrop" aria-hidden="true"></div>
   <div class="app">
     <aside class="sidebar" id="sidebar">
-      <div class="sidebar-brand">设备管理平台</div>
-      <nav class="sidebar-nav" id="sidebarNav">
+      <div class="sidebar-top">
+        <span class="sidebar-title">设备管理平台</span>
+        <button type="button" class="sidebar-toggle" id="sidebarToggle" title="收起菜单" aria-label="收起侧栏">◀</button>
+      </div>
+      <div class="sidebar-inner">
+        <nav class="sidebar-nav" id="sidebarNav">
         <div class="nav-group">
           <button type="button" class="nav-group-title" data-toggle="g-status">状态</button>
           <div class="nav-group-items" id="g-status">
             <button type="button" class="nav-item active" data-page="overview">总览</button>
             <button type="button" class="nav-item" data-page="users">用户列表</button>
-            <button type="button" class="nav-item" data-page="blacklist">黑名单</button>
           </div>
         </div>
         <div class="nav-group">
@@ -37,12 +40,6 @@
           </div>
         </div>
         <div class="nav-group">
-          <button type="button" class="nav-group-title" data-toggle="g-traffic">流量助手</button>
-          <div class="nav-group-items" id="g-traffic">
-            <button type="button" class="nav-item" data-page="traffic">流量助手</button>
-          </div>
-        </div>
-        <div class="nav-group">
           <button type="button" class="nav-group-title" data-toggle="g-sys">系统管理</button>
           <div class="nav-group-items" id="g-sys">
             <button type="button" class="nav-item" data-page="password">管理密码</button>
@@ -53,10 +50,8 @@
             <button type="button" class="nav-item" data-page="reboot">重启</button>
           </div>
         </div>
-        <div class="nav-group nav-group-bottom">
-          <button type="button" class="nav-item nav-single" data-page="wizard">设置向导</button>
-        </div>
       </nav>
+      </div>
     </aside>
 
     <div class="main-wrap">
@@ -68,10 +63,6 @@
           <h1 class="page-title" id="pageTitle">总览</h1>
         </div>
         <div class="topbar-actions">
-          <label class="traffic-toggle" title="流量开关">
-            <input type="checkbox" id="headerTrafficToggle" />
-            <span>流量</span>
-          </label>
           <span class="signal-bars" title="信号强度" aria-hidden="true">▮▮▮▯</span>
           <button type="button" class="btn-link" id="btnLogout">退出</button>
         </div>
@@ -126,16 +117,6 @@
                 <tbody></tbody>
               </table>
               <p class="table-foot" id="usersFoot"></p>
-            </div>
-          </div>
-        </section>
-
-        <!-- 黑名单 -->
-        <section class="page hidden" id="page-blacklist" data-title="黑名单">
-          <div class="card">
-            <div class="card-body">
-              <p class="muted">黑名单接口已预留，当前无条目。</p>
-              <pre class="code-block" id="blacklistJson"></pre>
             </div>
           </div>
         </section>
@@ -271,20 +252,6 @@
           </div>
         </section>
 
-        <!-- 流量 -->
-        <section class="page hidden" id="page-traffic" data-title="流量助手">
-          <div class="card">
-            <div class="card-body">
-              <div class="form-group switch-row">
-                <label>流量统计开关</label>
-                <label class="switch"><input type="checkbox" id="trafficEn" /><span class="slider"></span></label>
-              </div>
-              <p class="muted" id="trafficNote"></p>
-              <button type="button" class="btn btn-primary" id="btnSaveTraffic">保存</button>
-            </div>
-          </div>
-        </section>
-
         <!-- 管理密码 -->
         <section class="page hidden" id="page-password" data-title="管理密码">
           <div class="card">
@@ -394,15 +361,6 @@
           </div>
         </section>
 
-        <!-- 向导 -->
-        <section class="page hidden" id="page-wizard" data-title="设置向导">
-          <div class="card">
-            <div class="card-body">
-              <p>设置向导：请依次完成「网络配置 → WiFi设置 → 总览」。</p>
-              <button type="button" class="btn btn-primary" data-goto="network">前往网络配置</button>
-            </div>
-          </div>
-        </section>
       </main>
     </div>
   </div>

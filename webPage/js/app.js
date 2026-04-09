@@ -21,8 +21,6 @@
     cfgExport: '/api/system/config/export',
     cfgImport: '/api/system/config/import',
     usersOnline: '/api/users/online',
-    blacklist: '/api/users/blacklist',
-    traffic: '/api/traffic',
   };
 
   function $(id) {
@@ -169,12 +167,6 @@
     if (foot) {
       foot.textContent = '共 ' + (d.total != null ? d.total : users.length) + ' 条';
     }
-  }
-
-  async function loadBlacklist() {
-    const d = await jfetch(API.blacklist, { method: 'GET' });
-    const pre = $('blacklistJson');
-    if (pre) pre.textContent = JSON.stringify(d, null, 2);
   }
 
   async function loadNetworkForm() {
@@ -334,23 +326,6 @@
       body: JSON.stringify(body),
     });
     toast('WiFi 配置已保存');
-  }
-
-  async function loadTraffic() {
-    const d = await jfetch(API.traffic, { method: 'GET' });
-    if ($('trafficEn')) $('trafficEn').checked = !!d.traffic_enabled;
-    if ($('trafficNote')) $('trafficNote').textContent = d.note || '';
-    if ($('headerTrafficToggle')) $('headerTrafficToggle').checked = !!d.traffic_enabled;
-  }
-
-  async function saveTraffic() {
-    await jfetch(API.traffic, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ traffic_enabled: $('trafficEn').checked }),
-    });
-    if ($('headerTrafficToggle')) $('headerTrafficToggle').checked = $('trafficEn').checked;
-    toast('已保存');
   }
 
   async function loadProbes() {
@@ -556,18 +531,15 @@
     const loaders = {
       overview: loadOverview,
       users: loadUsers,
-      blacklist: loadBlacklist,
       network: loadNetworkForm,
       apn: loadApn,
       wifi: loadWifiAp,
-      traffic: loadTraffic,
       password: null,
       systime: loadSysTime,
       upgrade: null,
       logs: loadLogs,
       probes: loadProbes,
       reboot: loadRebootSched,
-      wizard: null,
     };
     const fn = loaders[page];
     if (fn) {
@@ -627,12 +599,6 @@
 
   $('btnSaveApn') && $('btnSaveApn').addEventListener('click', () => saveApn().catch((e) => toast(e.message, true)));
   $('btnSaveWifi') && $('btnSaveWifi').addEventListener('click', () => saveWifiAp().catch((e) => toast(e.message, true)));
-  $('btnSaveTraffic') && $('btnSaveTraffic').addEventListener('click', () => saveTraffic().catch((e) => toast(e.message, true)));
-  $('headerTrafficToggle') &&
-    $('headerTrafficToggle').addEventListener('change', () => {
-      if ($('trafficEn')) $('trafficEn').checked = $('headerTrafficToggle').checked;
-      saveTraffic().catch((e) => toast(e.message, true));
-    });
 
   $('btnSavePwd') && $('btnSavePwd').addEventListener('click', () => savePwd().catch((e) => toast(e.message, true)));
   $('btnSaveTime') && $('btnSaveTime').addEventListener('click', () => saveSysTime().catch((e) => toast(e.message, true)));
@@ -651,7 +617,54 @@
       toast('本地页面无会话，关闭浏览器即可。');
     });
 
+  const LS_SIDEBAR_COLLAPSED = 'sidebarCollapsed';
+
+  function updateSidebarToggleUi() {
+    const btn = $('sidebarToggle');
+    if (!btn) {
+      return;
+    }
+    const collapsed = document.body.classList.contains('sidebar-collapsed');
+    btn.textContent = collapsed ? '▶' : '◀';
+    btn.title = collapsed ? '展开菜单' : '收起菜单';
+    btn.setAttribute('aria-label', collapsed ? '展开侧栏' : '收起侧栏');
+  }
+
+  function setSidebarCollapsed(collapsed, persist) {
+    document.body.classList.toggle('sidebar-collapsed', !!collapsed);
+    updateSidebarToggleUi();
+    if (persist) {
+      try {
+        localStorage.setItem(LS_SIDEBAR_COLLAPSED, collapsed ? '1' : '0');
+      } catch (_) {}
+    }
+  }
+
+  function syncSidebarLayout() {
+    const desktop = window.matchMedia('(min-width: 900px)').matches;
+    const btn = $('sidebarToggle');
+    if (btn) {
+      btn.setAttribute('aria-hidden', desktop ? 'false' : 'true');
+    }
+    if (!desktop) {
+      document.body.classList.remove('sidebar-collapsed');
+      updateSidebarToggleUi();
+      return;
+    }
+    try {
+      setSidebarCollapsed(localStorage.getItem(LS_SIDEBAR_COLLAPSED) === '1', false);
+    } catch (_) {}
+  }
+
+  $('sidebarToggle') &&
+    $('sidebarToggle').addEventListener('click', () => {
+      const next = !document.body.classList.contains('sidebar-collapsed');
+      setSidebarCollapsed(next, true);
+    });
+
+  window.addEventListener('resize', debounce(syncSidebarLayout, 150));
+  syncSidebarLayout();
+
   showPage('overview');
   loadOverview().catch(() => {});
-  loadTraffic().catch(() => {});
 })();
