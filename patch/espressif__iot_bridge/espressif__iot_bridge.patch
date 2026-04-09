@@ -1,0 +1,316 @@
+diff --git "upstream/C:/Users/yongx/AppData/Local/Espressif/ComponentManager/Cache/service_d92d8f1e\\espressif__iot_bridge_1.0.2_3fb9ab7f/CMakeLists.txt" "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/CMakeLists.txt"
+index fa2e412..d202b88 100644
+--- "upstream/C:/Users/yongx/AppData/Local/Espressif/ComponentManager/Cache/service_d92d8f1e\\espressif__iot_bridge_1.0.2_3fb9ab7f/CMakeLists.txt"
++++ "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/CMakeLists.txt"
+@@ -18,7 +18,9 @@ if (CONFIG_BRIDGE_ETHERNET_NETIF_ENABLE)
+     list(APPEND srcs "src/bridge_eth.c")
+ endif()
+ 
+-if (CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
++# Single-PHY dual netif (ETH_WAN + ETH_LAN): AUTO mode, or patched External+Forwarding pair together.
++if (CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN OR
++    (CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET AND CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET))
+     list(APPEND srcs "src/esp_eth_netif_glue_wrap.c")
+ endif()
+ 
+diff --git "upstream/C:/Users/yongx/AppData/Local/Espressif/ComponentManager/Cache/service_d92d8f1e\\espressif__iot_bridge_1.0.2_3fb9ab7f/Kconfig" "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/Kconfig"
+index 05d8540..48b6949 100644
+--- "upstream/C:/Users/yongx/AppData/Local/Espressif/ComponentManager/Cache/service_d92d8f1e\\espressif__iot_bridge_1.0.2_3fb9ab7f/Kconfig"
++++ "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/Kconfig"
+@@ -38,12 +38,13 @@ menu "Bridge Configuration"
+ 
+         config BRIDGE_EXTERNAL_NETIF_ETHERNET
+             depends on !BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN && BRIDGE_ETHERNET_NETIF_ENABLE
+-            bool "Use ethernet interface to connect to the external network. Please disable BRIDGE_DATA_FORWARDING_NETIF_ETHERNET first"
++            bool "Use ethernet interface to connect to the external network"
+             default n
+             help
+-                "BRIDGE_EXTERNAL_NETIF_ETHERNET" and "BRIDGE_DATA_FORWARDING_NETIF_ETHERNET" cannot be enabled simultaneously at the moment.
+-                If using SPI Ethernet, ensure that the corresponding SPI Ethernet module configuration is enabled, e.g., CONFIG_ETH_SPI_ETHERNET_DM9051.
+-                Path: Component config → Ethernet → Support SPI to Ethernet Module → DM9051
++                Patched in 4g_nic: may be enabled together with BRIDGE_DATA_FORWARDING_NETIF_ETHERNET on a
++                single PHY (e.g. W5500); the stack uses the same shared-MAC glue as "Ethernet AUTO WAN/LAN".
++                Still mutually exclusive with BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN (pick AUTO or External+Forwarding).
++                If using SPI Ethernet, enable the module under Component config → Ethernet, e.g. CONFIG_ETH_SPI_ETHERNET_W5500.
+ 
+         config BRIDGE_EXTERNAL_NETIF_SPI
+             bool "Use SPI interface to connect to the external network. Please note that SPI Netif and SDIO Netif cannot be enabled simultaneously."
+@@ -108,7 +109,7 @@ menu "Bridge Configuration"
+                 config BRIDGE_SOFTAP_MAX_CONNECT_NUMBER
+                     int "Maximum number of connections per node"
+                     default 6 if !BRIDGE_CUSTOM_SOFTAP
+-                    default BRIDGE_CUSTOM_MAX_CONNECT_NUMBER if BRIDGE_CUSTOM_SOFTAP
++                    default 6 if BRIDGE_CUSTOM_SOFTAP
+                     range 1 LWIP_DHCPS_MAX_STATION_NUM if LWIP_DHCPS_MAX_STATION_NUM < BRIDGE_SOFTAP_CONNECT_NUMBER_RANGE_MAX
+                     range 1 BRIDGE_SOFTAP_CONNECT_NUMBER_RANGE_MAX if LWIP_DHCPS_MAX_STATION_NUM >= BRIDGE_SOFTAP_CONNECT_NUMBER_RANGE_MAX
+                     help
+@@ -125,12 +126,11 @@ menu "Bridge Configuration"
+         config BRIDGE_DATA_FORWARDING_NETIF_ETHERNET
+             depends on !BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN && BRIDGE_ETHERNET_NETIF_ENABLE
+             bool "Use ethernet interface to provide network data forwarding for other devices"
+-            depends on !BRIDGE_EXTERNAL_NETIF_ETHERNET
+             default n
+             help
+-                "BRIDGE_EXTERNAL_NETIF_ETHERNET" and "BRIDGE_DATA_FORWARDING_NETIF_ETHERNET" cannot be enabled simultaneously at the moment.
+-                If using SPI Ethernet, ensure that the corresponding SPI Ethernet module configuration is enabled, e.g., CONFIG_ETH_SPI_ETHERNET_DM9051.
+-                Path: Component config → Ethernet → Support SPI to Ethernet Module → DM9051
++                Patched in 4g_nic: may be enabled together with BRIDGE_EXTERNAL_NETIF_ETHERNET on one SPI/EMAC PHY.
++                Mutually exclusive with BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN (pick AUTO or External+Forwarding pair).
++                If using SPI Ethernet, enable the module under Component config → Ethernet.
+ 
+         config BRIDGE_DATA_FORWARDING_NETIF_SPI
+             bool "Use SPI interface to provide network data forwarding for other devices. Please note that SPI Netif and SDIO Netif cannot be enabled simultaneously."
+diff --git "upstream/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/LOCAL_PATCHES_README.md" "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/LOCAL_PATCHES_README.md"
+new file mode 100644
+index 0000000..a574393
+--- /dev/null
++++ "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/LOCAL_PATCHES_README.md"
+@@ -0,0 +1,34 @@
++# Local patches (4g_nic / Route B)
++
++Upstream `espressif/iot_bridge` is normally managed by the ESP-IDF Component Manager.
++**`idf.py update-dependencies` or re-resolving versions may overwrite files in this folder.**
++After an update, re-apply patches from git history or from the project’s documented diff.
++
++## Phase 1b: SPI dual-netif second attach must return ESP_OK
++
++`esp_bridge_eth_spi_init()` left `ret == ESP_FAIL` when attaching **ETH_WAN** after **ETH_LAN** (driver already
++started). That caused `esp_bridge_create_eth_netif()` to skip `esp_netif_up()` on ETH_WAN — DHCP toward the
++PC/shared adapter never ran. Fixed by returning `ESP_OK` on the attach-only path (`eth_is_start` already true).
++
++## Phase 1 (done here): External + Forwarding Ethernet on one PHY
++
++**Goal:** Allow `BRIDGE_EXTERNAL_NETIF_ETHERNET` and `BRIDGE_DATA_FORWARDING_NETIF_ETHERNET`
++to be enabled **at the same time** when `BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN` is **disabled**.
++
++**Why:** Stock iot-bridge forbids this in Kconfig, but a single W5500/EMAC cannot call
++`esp_bridge_eth_spi_init()` twice (one driver, two `esp_netif_attach`). The fix is to use
++the same **shared MAC glue** as AUTO mode (`esp_eth_netif_glue_wrap.c`).
++
++**Files touched:**
++
++- `Kconfig` — remove mutual exclusion between the two Ethernet options; refresh help text.
++- `CMakeLists.txt` — compile `esp_eth_netif_glue_wrap.c` when External+Forwarding pair is on.
++- `src/bridge_eth.c` — `BRIDGE_ETH_USE_SHARED_MAC_GLUE` = AUTO **or** (External **and** Forwarding Ethernet).
++
++**Still exclusive:** `BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN` vs the pair above (pick one style).
++
++## Planned later phases (not implemented here)
++
++- Relax / document SPI vs SDIO combined constraints (`NUM_DEFINED_MACROS`, Kconfig help).
++- Optional: unify `dhcp_dns_*_customer_cb` when multiple external netifs are active (STA + PPP + ETH).
++- Fork iot_bridge to a project-owned component if manager overwrites become unacceptable.
+diff --git "upstream/C:/Users/yongx/AppData/Local/Espressif/ComponentManager/Cache/service_d92d8f1e\\espressif__iot_bridge_1.0.2_3fb9ab7f/cmake/patch_utils.cmake" "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/cmake/patch_utils.cmake"
+index 86b66d6..e7ee435 100644
+--- "upstream/C:/Users/yongx/AppData/Local/Espressif/ComponentManager/Cache/service_d92d8f1e\\espressif__iot_bridge_1.0.2_3fb9ab7f/cmake/patch_utils.cmake"
++++ "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/cmake/patch_utils.cmake"
+@@ -70,7 +70,10 @@ function(apply_patches_from_list)
+                 if("$ENV{IDF_PATH}" STREQUAL "")
+                     message(FATAL_ERROR "IDF_PATH environment variable is not set")
+                 endif()
+-                string(REGEX REPLACE "^esp-idf" "$ENV{IDF_PATH}" current_path "${current_path}")
++                # Windows IDF_PATH contains backslashes; REGEX REPLACE treats \e etc. in the replacement as escapes.
++                file(TO_CMAKE_PATH "$ENV{IDF_PATH}" _iot_bridge_idf_path)
++                string(REGEX REPLACE "^esp-idf" "" _iot_bridge_rel "${current_path}")
++                set(current_path "${_iot_bridge_idf_path}${_iot_bridge_rel}")
+             endif()
+ 
+         # Check if this is a version condition (support multiple operators: <, <=, >, >=, =, ==)
+diff --git "upstream/C:/Users/yongx/AppData/Local/Espressif/ComponentManager/Cache/service_d92d8f1e\\espressif__iot_bridge_1.0.2_3fb9ab7f/patches/patches.list" "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/patches/patches.list"
+index acf24c5..aebdc15 100644
+--- "upstream/C:/Users/yongx/AppData/Local/Espressif/ComponentManager/Cache/service_d92d8f1e\\espressif__iot_bridge_1.0.2_3fb9ab7f/patches/patches.list"
++++ "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/patches/patches.list"
+@@ -7,6 +7,8 @@
+ 
+ [ip4_napt.patch]
+     path = esp-idf/components/lwip/lwip
++    idf_version < 5.2.0
+ 
+ [lwip_napt.patch]
+     path = esp-idf/components/lwip/lwip
++    idf_version < 5.2.0
+diff --git "upstream/C:/Users/yongx/AppData/Local/Espressif/ComponentManager/Cache/service_d92d8f1e\\espressif__iot_bridge_1.0.2_3fb9ab7f/src/bridge_eth.c" "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/src/bridge_eth.c"
+index 0c8def9..8ce6056 100644
+--- "upstream/C:/Users/yongx/AppData/Local/Espressif/ComponentManager/Cache/service_d92d8f1e\\espressif__iot_bridge_1.0.2_3fb9ab7f/src/bridge_eth.c"
++++ "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/src/bridge_eth.c"
+@@ -30,14 +30,20 @@
+ 
+ #include "sdkconfig.h"
+ 
++/* Single PHY serving ETH_WAN + ETH_LAN: upstream AUTO, or 4g_nic patch (External + Forwarding Ethernet together). */
++#if (defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN) ||                                                \
++     (defined(CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET) && defined(CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET)))
++#define BRIDGE_ETH_USE_SHARED_MAC_GLUE 1
++#endif
++
+ static const char *TAG = "bridge_eth";
+ 
+ static esp_eth_phy_t *phy = NULL;
+ 
+-#if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
++#ifdef BRIDGE_ETH_USE_SHARED_MAC_GLUE
+ esp_eth_netif_glue_handle_t esp_bridge_eth_new_netif_glue(esp_eth_handle_t eth_hdl);
+-esp_err_t esp_bridge_set_eth_lan_netif(esp_netif_t* netif);
+-esp_err_t esp_bridge_set_eth_wan_netif(esp_netif_t* netif);
++esp_err_t esp_bridge_set_eth_lan_netif(esp_netif_t *netif);
++esp_err_t esp_bridge_set_eth_wan_netif(esp_netif_t *netif);
+ #endif
+ 
+ /**
+@@ -175,7 +181,7 @@ esp_err_t esp_bridge_eth_init(esp_netif_t* eth_netif)
+     }
+ 
+     /* attach Ethernet driver to TCP/IP stack */
+-#if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
++#ifdef BRIDGE_ETH_USE_SHARED_MAC_GLUE
+     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_bridge_eth_new_netif_glue(eth_handle)));
+ #else
+     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handle)));
+@@ -200,6 +206,7 @@ esp_err_t esp_spi_eth_new_ksz8851snl(spi_device_interface_config_t *spi_devcfg,
+     esp_eth_mac_t *mac_spi;
+     // Init MAC and PHY configs to default
+     eth_mac_config_t mac_config_spi = ETH_MAC_DEFAULT_CONFIG();
++    mac_config_spi.rx_task_stack_size = 4096;
+     eth_phy_config_t phy_config_spi = ETH_PHY_DEFAULT_CONFIG();
+ 
+     // KSZ8851SNL ethernet driver is based on spi driver
+@@ -234,6 +241,7 @@ esp_err_t esp_spi_eth_new_dm9051(spi_device_interface_config_t *spi_devcfg, esp_
+     esp_eth_mac_t *mac_spi;
+     // Init MAC and PHY configs to default
+     eth_mac_config_t mac_config_spi = ETH_MAC_DEFAULT_CONFIG();
++    mac_config_spi.rx_task_stack_size = 4096;
+     eth_phy_config_t phy_config_spi = ETH_PHY_DEFAULT_CONFIG();
+ 
+     // dm9051 ethernet driver is based on spi driver
+@@ -268,6 +276,7 @@ esp_err_t esp_spi_eth_new_w5500(spi_device_interface_config_t *spi_devcfg, esp_n
+     esp_eth_mac_t *mac_spi;
+     // Init MAC and PHY configs to default
+     eth_mac_config_t mac_config_spi = ETH_MAC_DEFAULT_CONFIG();
++    mac_config_spi.rx_task_stack_size = 4096;
+     eth_phy_config_t phy_config_spi = ETH_PHY_DEFAULT_CONFIG();
+ 
+     // w5500 ethernet driver is based on spi driver
+@@ -346,33 +355,53 @@ esp_err_t esp_bridge_eth_spi_init(esp_netif_t* eth_netif_spi)
+         }));
+ 
+         // attach Ethernet driver to TCP/IP stack
+-#if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
++#ifdef BRIDGE_ETH_USE_SHARED_MAC_GLUE
+         ESP_ERROR_CHECK(esp_netif_attach(eth_netif_spi, esp_bridge_eth_new_netif_glue(eth_handle_spi)));
+ #else
+         ESP_ERROR_CHECK(esp_netif_attach(eth_netif_spi, esp_eth_new_netif_glue(eth_handle_spi)));
+ #endif
+     }
+ 
+-    if (!eth_is_start) {
++    if (!eth_is_start && eth_handle_spi != NULL) {
+         /* start Ethernet driver state machine */
+         ret = esp_eth_start(eth_handle_spi);
+-        eth_is_start = true;
++        if (ret == ESP_OK) {
++            eth_is_start = true;
++        } else {
++            ESP_LOGE(TAG, "esp_eth_start failed: %s", esp_err_to_name(ret));
++            esp_eth_driver_uninstall(eth_handle_spi);
++            eth_handle_spi = NULL;
++        }
++    } else if (eth_is_start && eth_handle_spi != NULL) {
++        /* Second netif (ETH_WAN after ETH_LAN): driver already started, attach-only path */
++        ret = ESP_OK;
+     }
+ 
+     return ret;
+ }
+ #endif // CONFIG_BRIDGE_USE_SPI_ETHERNET
+ 
++#if CONFIG_BRIDGE_USE_INTERNAL_ETHERNET
+ static esp_err_t esp_bridge_eth_reset_phy(void)
+ {
+     phy->reset_hw(phy);
+     ESP_LOGW(TAG, "Hardware Reset Ethernet PHY");
+     return ESP_OK;
+ }
++#endif
+ 
+ static esp_err_t eth_netif_dhcp_status_change_cb(esp_ip_addr_t *ip_info)
+ {
++    /* dns_change_cb passes NULL: upstream DNS pushed to DHCPS netif — must not reset SPI PHY. */
++    if (ip_info == NULL) {
++        return ESP_OK;
++    }
++#if CONFIG_BRIDGE_USE_SPI_ETHERNET
++    (void)ip_info;
++    return ESP_OK;
++#else
+     return esp_bridge_eth_reset_phy();
++#endif
+ }
+ 
+ static void eth_driver_free_rx_buffer(void *h, void* buffer)
+@@ -429,8 +458,9 @@ esp_netif_t* esp_bridge_create_eth_netif(esp_netif_ip_info_t* ip_info, uint8_t m
+     eth_config.base = &esp_netif_common_config;
+ 
+     esp_netif_t* netif = esp_bridge_create_netif(&eth_config, ip_info, mac, enable_dhcps);
+-    if (netif) {
+-#if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
++        if (netif) {
++        esp_err_t eth_init_ret = ESP_FAIL;
++#ifdef BRIDGE_ETH_USE_SHARED_MAC_GLUE
+         if (data_forwarding) {
+             esp_bridge_set_eth_lan_netif(netif);
+         } else {
+@@ -439,10 +469,14 @@ esp_netif_t* esp_bridge_create_eth_netif(esp_netif_ip_info_t* ip_info, uint8_t m
+ #endif
+         esp_netif_action_stop(netif, NULL, 0, NULL);
+ #if CONFIG_BRIDGE_USE_INTERNAL_ETHERNET
+-        esp_bridge_eth_init(netif);
++        eth_init_ret = esp_bridge_eth_init(netif);
+ #elif CONFIG_BRIDGE_USE_SPI_ETHERNET
+-        esp_bridge_eth_spi_init(netif);
++        eth_init_ret = esp_bridge_eth_spi_init(netif);
+ #endif
++        if (eth_init_ret != ESP_OK) {
++            ESP_LOGE(TAG, "[%-12s] ethernet init failed, skip netif up/NAPT", esp_netif_get_ifkey(netif));
++            return netif;
++        }
+         esp_netif_up(netif);
+ 
+         ESP_LOGI(TAG, "[%-12s]", esp_netif_get_ifkey(netif));
+diff --git "upstream/C:/Users/yongx/AppData/Local/Espressif/ComponentManager/Cache/service_d92d8f1e\\espressif__iot_bridge_1.0.2_3fb9ab7f/src/bridge_modem.c" "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/src/bridge_modem.c"
+index b2f6371..00442ca 100644
+--- "upstream/C:/Users/yongx/AppData/Local/Espressif/ComponentManager/Cache/service_d92d8f1e\\espressif__iot_bridge_1.0.2_3fb9ab7f/src/bridge_modem.c"
++++ "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/src/bridge_modem.c"
+@@ -117,7 +117,7 @@ esp_netif_t *esp_bridge_create_modem_netif(esp_netif_ip_info_t *custom_ip_info,
+     };
+     gpio_config(&io_config);
+     gpio_set_level(CONFIG_MODEM_RESET_GPIO, 0);
+-    vTaskDelay(pdMS_TO_TICKS(500));
++    vTaskDelay(pdMS_TO_TICKS(1500));
+     gpio_set_level(CONFIG_MODEM_RESET_GPIO, 1);
+ 
+     vTaskDelay(pdMS_TO_TICKS(MODULE_BOOT_TIME_MS));
+@@ -180,7 +180,7 @@ esp_netif_t *esp_bridge_create_modem_netif(esp_netif_ip_info_t *custom_ip_info,
+     esp_modem_dce_t *dce = esp_modem_new_dev_usb(ESP_MODEM_DCE_BG96, &dte_usb_config, &dce_config, esp_netif);
+     assert(dce);
+     esp_modem_set_error_cb(dce, usb_terminal_error_handler);
+-    vTaskDelay(pdMS_TO_TICKS(1000)); // Although the DTE should be ready after USB enumeration, sometimes it fails to respond without this delay
++    vTaskDelay(pdMS_TO_TICKS(2000)); // Although the DTE should be ready after USB enumeration, sometimes it fails to respond without this delay
+ 
+ #else
+ #error Invalid serial connection to modem.
+diff --git "upstream/C:/Users/yongx/AppData/Local/Espressif/ComponentManager/Cache/service_d92d8f1e\\espressif__iot_bridge_1.0.2_3fb9ab7f/src/bridge_wifi.c" "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/src/bridge_wifi.c"
+index b5b9efa..4fbd741 100644
+--- "upstream/C:/Users/yongx/AppData/Local/Espressif/ComponentManager/Cache/service_d92d8f1e\\espressif__iot_bridge_1.0.2_3fb9ab7f/src/bridge_wifi.c"
++++ "managed/F:/github/4g_nic\\managed_components\\espressif__iot_bridge/src/bridge_wifi.c"
+@@ -262,6 +262,11 @@ static void wifi_event_ap_stadisconnected_handler(void* arg, esp_event_base_t ev
+ 
+ static esp_err_t softap_netif_dhcp_status_change_cb(esp_ip_addr_t* ip_info)
+ {
++    /* dns_change_cb is invoked with NULL (DNS-only refresh). Do not deauth. */
++    if (ip_info == NULL) {
++        return ESP_OK;
++    }
++
+     esp_err_t ret = ESP_FAIL;
+     ESP_LOGI(TAG, "SoftAP IP network segment has changed, deauth all station");
+     if (esp_wifi_deauth_sta(0) == ESP_OK) {

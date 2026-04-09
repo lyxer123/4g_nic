@@ -63,7 +63,6 @@
           <h1 class="page-title" id="pageTitle">总览</h1>
         </div>
         <div class="topbar-actions">
-          <span class="signal-bars" title="信号强度" aria-hidden="true">▮▮▮▯</span>
           <button type="button" class="btn-link" id="btnLogout">退出</button>
         </div>
       </header>
@@ -128,13 +127,31 @@
             <div class="card-body form-stack">
               <p class="muted" id="hwProbeHint" style="margin:0 0 8px;font-size:13px;line-height:1.4;"></p>
               <div class="form-group">
-                <label for="selWanType">WAN 上行</label>
+                <label for="selWanType">WAN 上行（外网从哪走）</label>
                 <select id="selWanType" class="input"></select>
               </div>
               <div class="form-group">
-                <label for="selWorkMode">LAN / 具体模式</label>
+                <label for="selWorkMode">LAN 组合（内网：热点 / W5500 有线）</label>
                 <select id="selWorkMode" class="input"></select>
               </div>
+            </div>
+          </div>
+          <div class="card hidden" id="ethWanPanel">
+            <div class="card-header">有线外网 W5500（ETH_WAN）</div>
+            <div class="card-body form-stack">
+              <p class="muted" style="margin: 0 0 10px; font-size: 13px; line-height: 1.45">
+                当前模式为「W5500 作 WAN」时，RJ45 接上联路由器/光猫；此处配置本口 IP。改完后可点「保存」或仅用下方按钮提交。
+              </p>
+              <div class="form-group switch-row">
+                <label>DHCP 自动获取</label>
+                <label class="switch"><input type="checkbox" id="ethWanDhcp" checked /><span class="slider"></span></label>
+              </div>
+              <div class="form-group"><label>IP</label><input class="input" id="ethWanIp" type="text" placeholder="留空或静态" /></div>
+              <div class="form-group"><label>掩码</label><input class="input" id="ethWanMask" type="text" /></div>
+              <div class="form-group"><label>网关</label><input class="input" id="ethWanGw" type="text" /></div>
+              <div class="form-group"><label>DNS1</label><input class="input" id="ethWanDns1" type="text" /></div>
+              <div class="form-group"><label>DNS2</label><input class="input" id="ethWanDns2" type="text" /></div>
+              <button type="button" class="btn btn-secondary" id="btnSaveEthWan">仅保存有线 WAN 参数并应用</button>
             </div>
           </div>
           <div class="grid-2">

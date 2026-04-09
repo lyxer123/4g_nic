@@ -41,6 +41,9 @@ void app_main(void)
 
     system_hw_presence_probe_before_bridge();
 
+    /* Read/log work_mode before netifs; apply runs after bridge creates SoftAP / STA / Ethernet. */
+    system_mode_manager_log_startup_plan();
+
     system_bridge_init_netifs_from_hw();
     (void)system_mode_manager_apply_saved_or_hw_default();
     system_wifi_dual_connect_init();

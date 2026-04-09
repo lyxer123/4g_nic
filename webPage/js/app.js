@@ -10,6 +10,8 @@
     wifiScan: '/api/wifi/scan',
     wifiClear: '/api/wifi/clear',
     mode: '/api/mode',
+    modeApply: '/api/mode/apply',
+    ethWan: '/api/eth_wan',
     probes: '/api/system/probes',
     time: '/api/system/time',
     syncTime: '/api/system/sync_time',
@@ -75,6 +77,25 @@
     return d.innerHTML;
   }
 
+  function ifaceLooksUp(x) {
+    if (!x) return false;
+    if (x.up === true) return true;
+    const addr = String(x.address || '').trim();
+    return addr !== '' && addr !== '--' && addr !== '0.0.0.0';
+  }
+
+  function barsFromSignal(raw) {
+    if (raw == null) return '▮▮▮▯';
+    const s = String(raw).trim();
+    if (!s || s === '--' || s === '—') return '▮▮▮▯';
+    const n = parseInt(s, 10);
+    if (!Number.isFinite(n)) return '▮▮▮▯';
+    if (n >= -70) return '▮▮▮▮';
+    if (n >= -85) return '▮▮▮▯';
+    if (n >= -100) return '▮▮▯▯';
+    return '▮▯▯▯';
+  }
+
   async function loadOverview() {
     const d = await jfetch(API.dashboard, { method: 'GET' });
     const sys = d.system || {};
@@ -99,7 +120,6 @@
       ['IMEI', cell.imei || '—'],
       ['ICCID', cell.iccid || '—'],
       ['网络信号', cell.signal || '—'],
-      ['当月流量', cell.monthly_traffic || '—'],
       ['USB', cell.usb_probe || '—'],
     ];
     const ce = $('dashCell');
@@ -107,25 +127,50 @@
       ce.innerHTML = cr.map(([a, b]) => '<dt>' + esc(a) + '</dt><dd>' + esc(b) + '</dd>').join('');
     }
     const ifaces = Array.isArray(d.interfaces) ? d.interfaces : [];
+    const byName = {};
+    for (let i = 0; i < ifaces.length; i++) {
+      byName[String(ifaces[i].name || '')] = ifaces[i];
+    }
+
+    const cards = [];
+    const cellularBars = barsFromSignal(cell.signal);
+    const ppp = byName.wanrelay;
+    if (ppp && ifaceLooksUp(ppp)) {
+      cards.push({ ...ppp, name: '4G', signalBars: cellularBars });
+    }
+
+    const ethWan = byName.eth_wan;
+    const ethLan = byName.lan_eth;
+    if (ifaceLooksUp(ethWan)) {
+      cards.push({ ...ethWan, name: 'ETH_WAN' });
+    } else if (ifaceLooksUp(ethLan)) {
+      cards.push({ ...ethLan, name: 'ETH_LAN' });
+    }
+
+    const sta = byName.sta;
+    if (sta) {
+      cards.push({ ...sta, name: 'WIFI_STA', signalBars: '▮▮▮▯' });
+    }
+    const ap = byName.lanrelay;
+    if (ap) {
+      cards.push({ ...ap, name: 'WIFI_AP' });
+    }
+
     const ig = $('dashIfaces');
     if (ig) {
-      ig.innerHTML = ifaces
+      ig.innerHTML = cards
         .map(
           (x) =>
-            '<div class="iface-card"><h4>' +
+            '<div class="iface-card"><div class="iface-card-head"><h4>' +
             esc(x.name) +
-            '</h4><dl>' +
+            '</h4>' +
+            ((x.name === '4G' || x.name === 'WIFI_STA') ? '<span class="iface-signal" title="信号强度">' + esc(x.signalBars || '▮▮▮▯') + '</span>' : '') +
+            '</div><dl>' +
             '<dt>地址</dt><dd>' +
             esc(x.address) +
             '</dd>' +
             '<dt>MAC</dt><dd>' +
             esc(x.mac) +
-            '</dd>' +
-            '<dt>接收</dt><dd>' +
-            esc(x.rx) +
-            '</dd>' +
-            '<dt>发送</dt><dd>' +
-            esc(x.tx) +
             '</dd></dl></div>'
         )
         .join('');
@@ -170,10 +215,10 @@
   }
 
   const WAN_TYPE_LABEL = {
-    0: '无上行（仅 SoftAP 配网）',
-    1: '4G / USB 蜂窝',
-    2: 'Wi‑Fi 连接上级（STA）',
-    3: '有线以太（W5500）',
+    0: '无上行（仅配网 / 热点）',
+    1: '4G / USB 蜂窝（外网）',
+    2: 'Wi‑Fi 连上级路由（STA 外网）',
+    3: 'RJ45 W5500 作外网（WAN）',
   };
 
   let cachedModePayload = null;
@@ -192,23 +237,34 @@
 
   function lanSummaryLabel(m) {
     const parts = [];
-    if (m.lan_softap) parts.push('热点');
-    if (m.lan_eth) parts.push('有线 LAN');
-    if (!parts.length) parts.push('无下行转发');
+    if (m.lan_softap) parts.push('Wi‑Fi 热点');
+    if (m.lan_eth) parts.push('W5500 作内网(LAN)');
+    if (!parts.length) parts.push('无下行');
     const title = m.label != null ? String(m.label) : '模式';
-    return title + '（' + parts.join(' + ') + '）';
+    return title + ' — ' + parts.join(' + ');
   }
 
-  function fillWanSelect(modes) {
+  function fillWanSelect(modes, wanOptions) {
     const sel = $('selWanType');
     if (!sel) return;
     const types = wanTypesFromModes(modes);
+    const optMap = {};
+    if (Array.isArray(wanOptions)) {
+      for (let i = 0; i < wanOptions.length; i++) {
+        const w = wanOptions[i];
+        optMap[Number(w.wan_type)] = w;
+      }
+    }
     if (!types.length) {
       sel.innerHTML = '<option value="">— 无可用模式 —</option>';
       return;
     }
     sel.innerHTML = types
-      .map((t) => '<option value="' + t + '">' + esc(WAN_TYPE_LABEL[t] || 'WAN ' + t) + '</option>')
+      .map((t) => {
+        const o = optMap[t];
+        const note = o && o.reason_code && o.reason_code !== 'ok' ? '（' + o.reason_code + '）' : '';
+        return '<option value="' + t + '">' + esc((WAN_TYPE_LABEL[t] || 'WAN ' + t) + note) + '</option>';
+      })
       .join('');
   }
 
@@ -248,16 +304,56 @@
     return cachedModePayload.modes.find((m) => Number(m.id) === id) || null;
   }
 
+  async function loadEthWanFields() {
+    try {
+      const ew = await jfetch(API.ethWan, { method: 'GET' });
+      if ($('ethWanDhcp')) $('ethWanDhcp').checked = ew.dhcp !== false;
+      if ($('ethWanIp')) $('ethWanIp').value = ew.ip || '';
+      if ($('ethWanMask')) $('ethWanMask').value = ew.mask || '';
+      if ($('ethWanGw')) $('ethWanGw').value = ew.gw || '';
+      if ($('ethWanDns1')) $('ethWanDns1').value = ew.dns1 || '';
+      if ($('ethWanDns2')) $('ethWanDns2').value = ew.dns2 || '';
+    } catch (_) {}
+  }
+
+  function buildEthWanBody() {
+    return {
+      dhcp: $('ethWanDhcp') ? $('ethWanDhcp').checked : true,
+      ip: $('ethWanIp') ? $('ethWanIp').value.trim() : '',
+      mask: $('ethWanMask') ? $('ethWanMask').value.trim() : '',
+      gw: $('ethWanGw') ? $('ethWanGw').value.trim() : '',
+      dns1: $('ethWanDns1') ? $('ethWanDns1').value.trim() : '',
+      dns2: $('ethWanDns2') ? $('ethWanDns2').value.trim() : '',
+    };
+  }
+
+  async function saveEthWanOnly() {
+    await jfetch(API.ethWan, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildEthWanBody()),
+    });
+    try {
+      await jfetch(API.modeApply, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+    } catch (_) {}
+    toast('有线 WAN 已写入，并已按当前工作模式重试应用');
+  }
+
   async function loadNetworkForm() {
     const [d, md] = await Promise.all([jfetch(API.network, { method: 'GET' }), jfetch(API.mode, { method: 'GET' })]);
+    await loadEthWanFields();
     cachedModePayload = md;
     const modes = Array.isArray(md.modes) ? md.modes : [];
     setHwHint(md.hardware);
 
-    fillWanSelect(modes);
+    fillWanSelect(modes, md.wan_options);
     const curId = d.work_mode_id != null ? Number(d.work_mode_id) : Number(md.current) || 0;
     let curMode = modes.find((m) => Number(m.id) === curId);
-    let wanT = curMode ? Number(curMode.wan_type) : null;
+    let wanT = curMode ? Number(curMode.wan_type) : d.wan_type != null ? Number(d.wan_type) : null;
     const types = wanTypesFromModes(modes);
     if (wanT == null && types.length) {
       wanT = types[0];
@@ -294,12 +390,20 @@
     if ($('wan4g')) $('wan4g').checked = wan.lte_enabled !== false;
     if ($('wanNetMode')) $('wanNetMode').value = wan.network_mode || 'auto';
     toggleStaPanel();
+    toggleEthWanPanel();
   }
 
   function toggleStaPanel() {
     const row = selectedModeRow();
     const sec = $('staAdvanced');
     const v = row && row.needs_sta === true;
+    if (sec) sec.classList.toggle('hidden', !v);
+  }
+
+  function toggleEthWanPanel() {
+    const row = selectedModeRow();
+    const sec = $('ethWanPanel');
+    const v = row && row.needs_eth_wan === true;
     if (sec) sec.classList.toggle('hidden', !v);
   }
 
@@ -310,8 +414,17 @@
       toast('请选择 LAN/工作模式', true);
       return;
     }
+    const rowPre = selectedModeRow();
+    if (rowPre && rowPre.needs_eth_wan) {
+      await jfetch(API.ethWan, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildEthWanBody()),
+      });
+    }
     const body = {
       work_mode_id: workId,
+      wan_type: parseInt($('selWanType').value, 10),
       lan: {
         ip: $('lanIp').value.trim(),
         mask: $('lanMask').value.trim(),
@@ -713,8 +826,14 @@
         fillModeSelect(modes, wt);
       }
       toggleStaPanel();
+      toggleEthWanPanel();
     });
-  $('selWorkMode') && $('selWorkMode').addEventListener('change', toggleStaPanel);
+  $('selWorkMode') &&
+    $('selWorkMode').addEventListener('change', () => {
+      toggleStaPanel();
+      toggleEthWanPanel();
+    });
+  $('btnSaveEthWan') && $('btnSaveEthWan').addEventListener('click', () => saveEthWanOnly().catch((e) => toast(e.message, true)));
   $('btnSaveSta') && $('btnSaveSta').addEventListener('click', () => saveSta().catch((e) => toast(e.message, true)));
   $('btnLoadSta') && $('btnLoadSta').addEventListener('click', () => loadSta().catch((e) => toast(e.message, true)));
   $('btnScanSta') && $('btnScanSta').addEventListener('click', () => scanSta().catch((e) => toast(e.message, true)));

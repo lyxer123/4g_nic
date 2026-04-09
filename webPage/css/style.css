@@ -424,6 +424,25 @@ body.sidebar-open .sidebar {
   color: var(--accent);
 }
 
+.iface-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.iface-card-head h4 {
+  margin-bottom: 0;
+}
+
+.iface-signal {
+  letter-spacing: 1px;
+  color: var(--accent);
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
 .iface-card dl {
   display: grid;
   grid-template-columns: auto 1fr;

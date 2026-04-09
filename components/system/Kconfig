@@ -77,6 +77,15 @@ menu "System options"
         help
           If y, a composite CDC modem without a listed VID/PID may be reported as present. Prefer fixing VID/PID table.
 
+    config SYSTEM_ALWAYS_CREATE_MODEM_NETIF
+        bool "Always create IoT-Bridge PPP modem netif even when USB Cat.1 probe fails"
+        default n
+        depends on BRIDGE_EXTERNAL_NETIF_MODEM
+        help
+          Default n: skip esp_bridge_create_modem_netif when no USB LTE module was detected at boot — avoids
+          modem GPIO reset / esp_modem init when the 4G board is absent. Enable y only if you need PPP
+          hotplug without reboot (module may appear later on USB).
+
     config SYSTEM_ETH_WAN_USE_STATIC_IP
         bool "ETH_WAN use static IPv4 (skip DHCP)"
         default n

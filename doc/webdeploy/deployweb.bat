@@ -31,14 +31,14 @@ if errorlevel 1 (
 )
 
 REM Flash offsets MUST match project root partitions_4mb.csv (www partition only).
-REM   www: offset 0x380000, size 0x25800 (150KB) — 4MB flash layout
-set "OFFSET=0x380000"
-set "WWW_SIZE=153600"
+REM   www: offset 0x3B0000, size 0x18000 (96KB) — 4MB flash layout
+set "OFFSET=0x3B0000"
+set "WWW_SIZE=98304"
 REM Port: use ESPPORT env if set, else default COM5
 if not defined ESPPORT set "ESPPORT=COM8"
 echo.
 echo ========================================
-echo Using www partition offset: !OFFSET! size 0x25800 (150KB) - see partitions_4mb.csv
+echo Using www partition offset: !OFFSET! size 0x18000 (96KB) - see partitions_4mb.csv
 echo ========================================
 echo.
 echo Note: Offset must match partition table. After flash, verify in serial: "Found partition \"www\": offset=0x380000"
@@ -64,7 +64,7 @@ if errorlevel 1 (
 )
 
 REM Execute mklittlefs command to create filesystem image from staging (gzipped files)
-echo Creating LittleFS image from %STAGING_DIR% (size %WWW_SIZE% = 0x25800 = 150KB)...
+echo Creating LittleFS image from %STAGING_DIR% (size %WWW_SIZE% = 0x18000 = 96KB)...
 echo executing: !MKFS_PATH! -c "%STAGING_DIR%" -p 256 -b 4096 -s %WWW_SIZE% -a "%OUTPUT_DIR%\www.bin"
 !MKFS_PATH! -c "%STAGING_DIR%" -p 256 -b 4096 -s %WWW_SIZE% -a "%OUTPUT_DIR%\www.bin"
 

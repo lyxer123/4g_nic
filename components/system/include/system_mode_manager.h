@@ -41,7 +41,12 @@ typedef struct {
 
 esp_err_t system_mode_manager_apply(uint8_t mode);
 esp_err_t system_mode_manager_apply_saved(void);
-/** Prefer saved NVS mode when allowed; else pick mode from HW (USB / W5500) probes + build flags. */
+/**
+ * Log NVS `work_mode` (or absence) for startup diagnostics. Call after HW probe, before
+ * `system_bridge_init_netifs_from_hw()`, then call `system_mode_manager_apply_saved_or_hw_default()`.
+ */
+void system_mode_manager_log_startup_plan(void);
+/** Prefer saved NVS mode when allowed; else SoftAP-only provisioning (11), else HW-based default. */
 esp_err_t system_mode_manager_apply_saved_or_hw_default(void);
 /** Best-effort default mode id for current hardware (see profiles in system_mode_manager.c). */
 uint8_t system_mode_manager_pick_hw_default_mode(void);

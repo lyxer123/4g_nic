@@ -372,6 +372,9 @@ esp_err_t esp_bridge_eth_spi_init(esp_netif_t* eth_netif_spi)
             esp_eth_driver_uninstall(eth_handle_spi);
             eth_handle_spi = NULL;
         }
+    } else if (eth_is_start && eth_handle_spi != NULL) {
+        /* Second netif (ETH_WAN after ETH_LAN): driver already started, attach-only path */
+        ret = ESP_OK;
     }
 
     return ret;

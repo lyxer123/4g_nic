@@ -109,7 +109,7 @@ menu "Bridge Configuration"
                 config BRIDGE_SOFTAP_MAX_CONNECT_NUMBER
                     int "Maximum number of connections per node"
                     default 6 if !BRIDGE_CUSTOM_SOFTAP
-                    default BRIDGE_CUSTOM_MAX_CONNECT_NUMBER if BRIDGE_CUSTOM_SOFTAP
+                    default 6 if BRIDGE_CUSTOM_SOFTAP
                     range 1 LWIP_DHCPS_MAX_STATION_NUM if LWIP_DHCPS_MAX_STATION_NUM < BRIDGE_SOFTAP_CONNECT_NUMBER_RANGE_MAX
                     range 1 BRIDGE_SOFTAP_CONNECT_NUMBER_RANGE_MAX if LWIP_DHCPS_MAX_STATION_NUM >= BRIDGE_SOFTAP_CONNECT_NUMBER_RANGE_MAX
                     help

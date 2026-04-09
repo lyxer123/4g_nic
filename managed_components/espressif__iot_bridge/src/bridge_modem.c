@@ -9,6 +9,7 @@
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_netif_ppp.h"
@@ -42,6 +43,208 @@ static const char *TAG = "bridge_modem";
 static EventGroupHandle_t event_group = NULL;
 static const int CONNECT_BIT = BIT0;
 static const int USB_DISCONNECTED_BIT = BIT3; // Used only with USB DTE but we define it unconditionally, to avoid too many #ifdefs in the code
+static esp_modem_dce_t *s_dce = NULL;
+static SemaphoreHandle_t s_modem_lock;
+
+static void modem_info_reset(esp_bridge_modem_info_t *info)
+{
+    memset(info, 0, sizeof(*info));
+    info->rssi = 99;
+    info->ber = 99;
+    info->act = -1;
+    snprintf(info->operator_name, sizeof(info->operator_name), "--");
+    snprintf(info->network_mode, sizeof(info->network_mode), "--");
+    snprintf(info->imei, sizeof(info->imei), "--");
+    snprintf(info->imsi, sizeof(info->imsi), "--");
+    snprintf(info->iccid, sizeof(info->iccid), "--");
+    snprintf(info->module_name, sizeof(info->module_name), "--");
+}
+
+static const char *act_to_mode(int act)
+{
+    switch (act) {
+    case 0: return "GSM";
+    case 2: return "WCDMA";
+    case 7: return "LTE";
+    default: return "--";
+    }
+}
+
+static char s_iccid_parse_buf[32];
+static int s_cops_act = -1;
+
+static const char *decode_cn_operator(const char *code)
+{
+    if (!code || code[0] == '\0') {
+        return NULL;
+    }
+    if (strncmp(code, "46000", 5) == 0 || strncmp(code, "46002", 5) == 0 ||
+        strncmp(code, "46004", 5) == 0 || strncmp(code, "46007", 5) == 0 ||
+        strncmp(code, "46008", 5) == 0 || strncmp(code, "46013", 5) == 0 ||
+        strncmp(code, "898600", 6) == 0 || strncmp(code, "898602", 6) == 0) {
+        return "中国移动";
+    }
+    if (strncmp(code, "46001", 5) == 0 || strncmp(code, "46006", 5) == 0 ||
+        strncmp(code, "46009", 5) == 0 || strncmp(code, "46010", 5) == 0 ||
+        strncmp(code, "898601", 6) == 0) {
+        return "中国联通";
+    }
+    if (strncmp(code, "46003", 5) == 0 || strncmp(code, "46005", 5) == 0 ||
+        strncmp(code, "46011", 5) == 0 || strncmp(code, "898603", 6) == 0) {
+        return "中国电信";
+    }
+    return NULL;
+}
+
+static void try_fill_operator_from_sim(esp_bridge_modem_info_t *info)
+{
+    if (!info) {
+        return;
+    }
+    if (strcmp(info->operator_name, "--") != 0) {
+        return;
+    }
+    const char *op = decode_cn_operator(info->imsi);
+    if (!op) {
+        op = decode_cn_operator(info->iccid);
+    }
+    if (op) {
+        snprintf(info->operator_name, sizeof(info->operator_name), "%s", op);
+    }
+}
+static esp_err_t iccid_line_cb(uint8_t *data, size_t len)
+{
+    if (!data || len == 0) {
+        return ESP_OK;
+    }
+    int start = -1;
+    int end = -1;
+    for (size_t i = 0; i < len; i++) {
+        if (data[i] >= '0' && data[i] <= '9') {
+            if (start < 0) {
+                start = (int)i;
+            }
+            end = (int)i;
+        } else if (start >= 0) {
+            break;
+        }
+    }
+    if (start >= 0 && end >= start) {
+        int n = end - start + 1;
+        if (n > 0 && n < (int)sizeof(s_iccid_parse_buf)) {
+            memcpy(s_iccid_parse_buf, data + start, (size_t)n);
+            s_iccid_parse_buf[n] = '\0';
+        }
+    }
+    return ESP_OK;
+}
+
+static esp_err_t cops_line_cb(uint8_t *data, size_t len)
+{
+    if (!data || len == 0) {
+        return ESP_OK;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (data[i] == ',') {
+            int v = 0;
+            bool has = false;
+            for (size_t j = i + 1; j < len; j++) {
+                if (data[j] >= '0' && data[j] <= '9') {
+                    has = true;
+                    v = v * 10 + (data[j] - '0');
+                } else if (has) {
+                    s_cops_act = v;
+                    return ESP_OK;
+                }
+            }
+            if (has) {
+                s_cops_act = v;
+            }
+            return ESP_OK;
+        }
+    }
+    return ESP_OK;
+}
+
+esp_err_t esp_bridge_modem_get_info(esp_bridge_modem_info_t *info)
+{
+    if (!info) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    modem_info_reset(info);
+    if (!s_dce) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!s_modem_lock) {
+        s_modem_lock = xSemaphoreCreateMutex();
+    }
+    if (!s_modem_lock || xSemaphoreTake(s_modem_lock, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    info->present = true;
+
+    esp_netif_t *ppp = esp_netif_get_handle_from_ifkey("PPP_DEF");
+    if (ppp) {
+        esp_netif_ip_info_t ip = {0};
+        if (esp_netif_get_ip_info(ppp, &ip) == ESP_OK && ip.ip.addr != 0) {
+            info->ppp_has_ip = true;
+        }
+    }
+
+    (void)esp_modem_pause_net(s_dce, true);
+
+    char buf[64] = {0};
+    int act = -1;
+    if (esp_modem_get_operator_name(s_dce, buf, &act) == ESP_OK && buf[0] != '\0') {
+        snprintf(info->operator_name, sizeof(info->operator_name), "%.*s",
+                 (int)sizeof(info->operator_name) - 1, buf);
+        info->act = act;
+        snprintf(info->network_mode, sizeof(info->network_mode), "%s", act_to_mode(act));
+    }
+    memset(buf, 0, sizeof(buf));
+    if (esp_modem_get_imei(s_dce, buf) == ESP_OK && buf[0] != '\0') {
+        snprintf(info->imei, sizeof(info->imei), "%.*s", (int)sizeof(info->imei) - 1, buf);
+    }
+    memset(buf, 0, sizeof(buf));
+    if (esp_modem_get_imsi(s_dce, buf) == ESP_OK && buf[0] != '\0') {
+        snprintf(info->imsi, sizeof(info->imsi), "%.*s", (int)sizeof(info->imsi) - 1, buf);
+    }
+    memset(buf, 0, sizeof(buf));
+    if (esp_modem_get_module_name(s_dce, buf) == ESP_OK && buf[0] != '\0') {
+        snprintf(info->module_name, sizeof(info->module_name), "%.*s",
+                 (int)sizeof(info->module_name) - 1, buf);
+    }
+    int rssi = 99, ber = 99;
+    if (esp_modem_get_signal_quality(s_dce, &rssi, &ber) == ESP_OK) {
+        info->rssi = rssi;
+        info->ber = ber;
+    }
+    memset(s_iccid_parse_buf, 0, sizeof(s_iccid_parse_buf));
+    if (esp_modem_command(s_dce, "AT+ICCID", iccid_line_cb, 1500) != ESP_OK || s_iccid_parse_buf[0] == '\0') {
+        memset(s_iccid_parse_buf, 0, sizeof(s_iccid_parse_buf));
+        (void)esp_modem_command(s_dce, "AT+CCID", iccid_line_cb, 1500);
+    }
+    if (s_iccid_parse_buf[0] == '\0') {
+        memset(s_iccid_parse_buf, 0, sizeof(s_iccid_parse_buf));
+        (void)esp_modem_command(s_dce, "AT+QCCID", iccid_line_cb, 1500);
+    }
+    if (s_iccid_parse_buf[0] != '\0') {
+        snprintf(info->iccid, sizeof(info->iccid), "%.*s", (int)sizeof(info->iccid) - 1, s_iccid_parse_buf);
+    }
+    if (strcmp(info->network_mode, "--") == 0) {
+        s_cops_act = -1;
+        if (esp_modem_command(s_dce, "AT+COPS?", cops_line_cb, 1500) == ESP_OK && s_cops_act >= 0) {
+            snprintf(info->network_mode, sizeof(info->network_mode), "%s", act_to_mode(s_cops_act));
+            info->act = s_cops_act;
+        }
+    }
+    try_fill_operator_from_sim(info);
+
+    (void)esp_modem_pause_net(s_dce, false);
+    xSemaphoreGive(s_modem_lock);
+    return ESP_OK;
+}
 
 #if (defined(CONFIG_BRIDGE_SERIAL_VIA_USB)) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0))
 #include "esp_modem_usb_c_api.h"
@@ -224,5 +427,6 @@ esp_netif_t *esp_bridge_create_modem_netif(esp_netif_ip_info_t *custom_ip_info, 
     /* Wait for IP address */
     ESP_LOGI(TAG, "Waiting for IP address");
     xEventGroupWaitBits(event_group, CONNECT_BIT | USB_DISCONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+    s_dce = dce;
     return esp_netif;
 }

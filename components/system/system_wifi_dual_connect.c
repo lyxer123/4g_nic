@@ -17,6 +17,10 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_netif_net_stack.h"
+#include "sdkconfig.h"
+#if CONFIG_LWIP_PPP_SUPPORT
+#include "esp_netif_ppp.h"
+#endif
 
 #include "system_wifi_dual_connect.h"
 
@@ -26,10 +30,12 @@ typedef enum {
     UPLINK_NONE = 0,
     UPLINK_WIFI_STA,
     UPLINK_ETH_WAN,
+    UPLINK_USB_MODEM,
 } uplink_t;
 
 static bool s_wifi_up = false;
 static bool s_eth_up = false;
+static bool s_ppp_up = false;
 static uplink_t s_default = UPLINK_NONE;
 
 static void softap_napt_refresh(void)
@@ -118,6 +124,7 @@ static esp_netif_t *get_uplink_netif(uplink_t u)
 {
     if (u == UPLINK_WIFI_STA) return esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     if (u == UPLINK_ETH_WAN) return esp_netif_get_handle_from_ifkey("ETH_WAN");
+    if (u == UPLINK_USB_MODEM) return esp_netif_get_handle_from_ifkey("PPP_DEF");
     return NULL;
 }
 
@@ -132,6 +139,11 @@ static uplink_t choose_default_uplink(void)
     if (s_wifi_up) {
         return UPLINK_WIFI_STA;
     }
+#if CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM
+    if (s_ppp_up) {
+        return UPLINK_USB_MODEM;
+    }
+#endif
     return UPLINK_NONE;
 }
 
@@ -172,6 +184,11 @@ static void on_uplink_got_ip(void *arg, esp_event_base_t base, int32_t id, void 
     (void)ifkey_is_eth_wan;
     (void)ev;
 #endif
+#if CONFIG_LWIP_PPP_SUPPORT
+    if (id == IP_EVENT_PPP_GOT_IP) {
+        s_ppp_up = true;
+    }
+#endif
 
     // Update default route according to current policy.
     apply_default_route(choose_default_uplink());
@@ -204,6 +221,11 @@ static void on_uplink_lost_ip(void *arg, esp_event_base_t base, int32_t id, void
 #else
     (void)data;
 #endif
+#if CONFIG_LWIP_PPP_SUPPORT
+    if (id == IP_EVENT_PPP_LOST_IP) {
+        s_ppp_up = false;
+    }
+#endif
 
     apply_default_route(choose_default_uplink());
     softap_dhcps_full_config();
@@ -213,9 +235,15 @@ void system_wifi_dual_connect_init(void)
 {
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_uplink_got_ip, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &on_uplink_got_ip, NULL));
+#if CONFIG_LWIP_PPP_SUPPORT
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_PPP_GOT_IP, &on_uplink_got_ip, NULL));
+#endif
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP, &on_uplink_lost_ip, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_LOST_IP, &on_uplink_lost_ip, NULL));
+#if CONFIG_LWIP_PPP_SUPPORT
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_PPP_LOST_IP, &on_uplink_lost_ip, NULL));
+#endif
 #endif
 
     // Initial SoftAP DHCP/NAPT setup.

@@ -16,6 +16,7 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
+#include "esp_bridge.h"
 #include "nvs.h"
 #include "esp_timer.h"
 #include "esp_system.h"
@@ -84,6 +85,7 @@ static void log_ring_fmt(const char *fmt, ...)
 #define NVS_KEY_WAN4G   "wan_4g"
 #define NVS_KEY_WANNM   "wan_net_mode"
 #define NVS_KEY_UIWM    "ui_work_mode"
+#define NVS_KEY_WANTYPE "wan_type"
 #define NVS_KEY_SCH_EN  "rb_sch_en"
 #define NVS_KEY_SCH_H   "rb_sch_h"
 #define NVS_KEY_SCH_M   "rb_sch_m"
@@ -255,6 +257,95 @@ static cJSON *json_build_mode_list(void)
     return arr;
 }
 
+static bool netif_has_ipv4(const char *ifkey)
+{
+    esp_netif_t *n = esp_netif_get_handle_from_ifkey(ifkey);
+    if (!n) {
+        return false;
+    }
+    esp_netif_ip_info_t ip = {0};
+    if (esp_netif_get_ip_info(n, &ip) != ESP_OK) {
+        return false;
+    }
+    return ip.ip.addr != 0;
+}
+
+static bool mode_allowed_for_wan_type(system_wan_type_t wan_type)
+{
+    size_t n = 0;
+    const system_mode_profile_t *profiles = system_mode_manager_get_profiles(&n);
+    for (size_t i = 0; i < n; i++) {
+        if (profiles[i].wan_type == wan_type && profiles[i].lan_softap
+            && system_mode_manager_mode_allowed(profiles[i].id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static uint8_t pick_preferred_mode_for_wan_type(system_wan_type_t wan_type)
+{
+    size_t n = 0;
+    const system_mode_profile_t *profiles = system_mode_manager_get_profiles(&n);
+    for (size_t i = 0; i < n; i++) {
+        if (profiles[i].wan_type == wan_type && profiles[i].lan_softap
+            && system_mode_manager_mode_allowed(profiles[i].id)) {
+            return profiles[i].id;
+        }
+    }
+    return 0;
+}
+
+static const char *wan_unavailable_reason(system_wan_type_t wan_type)
+{
+    switch (wan_type) {
+    case SYSTEM_WAN_NONE:
+        return mode_allowed_for_wan_type(wan_type) ? "ok" : "no_ap_profile";
+    case SYSTEM_WAN_USB_MODEM:
+#if CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM
+        if (!hw_usb_lte()) {
+            return "usb_modem_absent";
+        }
+        return netif_has_ipv4("PPP_DEF") ? "ok" : "usb_present_no_ip";
+#else
+        return "feature_disabled";
+#endif
+    case SYSTEM_WAN_WIFI_STA:
+#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_STATION)
+        return mode_allowed_for_wan_type(wan_type) ? "ok" : "no_sta_softap_profile";
+#else
+        return "feature_disabled";
+#endif
+    case SYSTEM_WAN_W5500:
+#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET) || defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
+        return hw_w5500() ? "ok" : "w5500_absent";
+#else
+        return "feature_disabled";
+#endif
+    default:
+        return "unknown";
+    }
+}
+
+static cJSON *json_build_wan_options(void)
+{
+    cJSON *arr = cJSON_CreateArray();
+    if (!arr) {
+        return NULL;
+    }
+    const system_wan_type_t all_types[] = {SYSTEM_WAN_WIFI_STA, SYSTEM_WAN_W5500, SYSTEM_WAN_USB_MODEM, SYSTEM_WAN_NONE};
+    for (size_t i = 0; i < sizeof(all_types) / sizeof(all_types[0]); i++) {
+        const system_wan_type_t wt = all_types[i];
+        const char *reason = wan_unavailable_reason(wt);
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "wan_type", (double)wt);
+        cJSON_AddBoolToObject(o, "available", strcmp(reason, "ok") == 0);
+        cJSON_AddStringToObject(o, "reason_code", reason);
+        cJSON_AddItemToArray(arr, o);
+    }
+    return arr;
+}
+
 static void json_add_netif_ip(cJSON *root, const char *name, const char *ifkey)
 {
     esp_netif_t *n = esp_netif_get_handle_from_ifkey(ifkey);
@@ -289,24 +380,6 @@ static esp_err_t send_json(httpd_req_t *req, int code, const char *json)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_status(req, code == 200 ? "200 OK" : "400 Bad Request");
     return httpd_resp_sendstr(req, json);
-}
-
-static esp_err_t load_sta_from_nvs(char *ssid, size_t ssid_len, char *password, size_t password_len)
-{
-    nvs_handle_t nvs = 0;
-    esp_err_t ret = nvs_open("wifi_cfg", NVS_READONLY, &nvs);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    ret = nvs_get_str(nvs, "sta_ssid", ssid, &ssid_len);
-    if (ret != ESP_OK) {
-        nvs_close(nvs);
-        return ret;
-    }
-    ret = nvs_get_str(nvs, "sta_pwd", password, &password_len);
-    nvs_close(nvs);
-    return ret;
 }
 
 static esp_err_t save_sta_to_nvs(const char *ssid, const char *password)
@@ -787,6 +860,10 @@ static esp_err_t uri_mode_get(httpd_req_t *req)
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"oom\"}");
     }
     cJSON_AddItemToObject(root, "modes", modes);
+    cJSON *wans = json_build_wan_options();
+    if (wans) {
+        cJSON_AddItemToObject(root, "wan_options", wans);
+    }
 
     system_mode_status_t mst;
     system_mode_manager_get_status(&mst);
@@ -877,12 +954,14 @@ static esp_err_t uri_mode_apply_post(httpd_req_t *req)
             return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
         }
         cJSON *mid = cJSON_GetObjectItem(root, "mode");
-        if (!cJSON_IsNumber(mid)) {
-            cJSON_Delete(root);
-            return send_json(req, 400, "{\"status\":\"error\",\"message\":\"mode required\"}");
+        const bool have_mode = cJSON_IsNumber(mid);
+        if (have_mode) {
+            m = (uint8_t)mid->valuedouble;
         }
-        m = (uint8_t)mid->valuedouble;
         cJSON_Delete(root);
+        if (!have_mode && load_work_mode_u8(&m) != ESP_OK) {
+            return send_json(req, 400, "{\"status\":\"error\",\"message\":\"mode or saved work_mode required\"}");
+        }
     } else {
         if (load_work_mode_u8(&m) != ESP_OK) {
             return send_json(req, 400, "{\"status\":\"error\",\"message\":\"no saved mode\"}");
@@ -1040,16 +1119,15 @@ static char *http_recv_body(httpd_req_t *req, int max_len)
 
 static uint8_t pick_mode_for_ui_working_mode(const char *wm)
 {
-    size_t n = 0;
-    const system_mode_profile_t *profiles = system_mode_manager_get_profiles(&n);
-    if (!wm || !profiles) {
+    if (!wm) {
         return system_mode_manager_pick_hw_default_mode();
     }
     if (strcmp(wm, "router") == 0) {
-        for (size_t i = 0; i < n; i++) {
-            if (profiles[i].needs_sta && profiles[i].lan_softap
-                && system_mode_manager_mode_allowed(profiles[i].id)) {
-                return profiles[i].id;
+        const system_wan_type_t pref[] = {SYSTEM_WAN_W5500, SYSTEM_WAN_WIFI_STA, SYSTEM_WAN_USB_MODEM};
+        for (size_t i = 0; i < sizeof(pref) / sizeof(pref[0]); i++) {
+            uint8_t m = pick_preferred_mode_for_wan_type(pref[i]);
+            if (m != 0) {
+                return m;
             }
         }
     } else if (strcmp(wm, "ap") == 0) {
@@ -1060,11 +1138,9 @@ static uint8_t pick_mode_for_ui_working_mode(const char *wm)
             return 10;
         }
     } else {
-        for (size_t i = 0; i < n; i++) {
-            if (profiles[i].wan_type == SYSTEM_WAN_USB_MODEM && profiles[i].lan_softap && !profiles[i].needs_sta
-                && system_mode_manager_mode_allowed(profiles[i].id)) {
-                return profiles[i].id;
-            }
+        uint8_t m = pick_preferred_mode_for_wan_type(SYSTEM_WAN_USB_MODEM);
+        if (m != 0) {
+            return m;
         }
     }
     return system_mode_manager_pick_hw_default_mode();
@@ -1162,12 +1238,11 @@ static esp_err_t uri_dashboard_overview_get(httpd_req_t *req)
     cJSON_AddItemToObject(root, "system", sys);
 
     cJSON *cell = cJSON_CreateObject();
-    cJSON_AddStringToObject(cell, "operator", hw_usb_lte() ? "—" : "--");
+    cJSON_AddStringToObject(cell, "operator", "--");
     cJSON_AddStringToObject(cell, "network_mode", "--");
     cJSON_AddStringToObject(cell, "imei", "--");
     cJSON_AddStringToObject(cell, "iccid", "--");
     cJSON_AddStringToObject(cell, "signal", "--");
-    cJSON_AddStringToObject(cell, "monthly_traffic", "--");
     uint16_t vid = 0;
     uint16_t pid = 0;
     system_usb_cat1_detect_last_ids(&vid, &pid);
@@ -1175,6 +1250,23 @@ static esp_err_t uri_dashboard_overview_get(httpd_req_t *req)
     snprintf(usbinfo, sizeof(usbinfo), "vid:pid %04x:%04x", (unsigned)vid, (unsigned)pid);
     cJSON_AddStringToObject(cell, "usb_probe", usbinfo);
     cJSON_AddBoolToObject(cell, "usb_lte_ready", hw_usb_lte());
+#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM)
+    esp_bridge_modem_info_t mi;
+    if (esp_bridge_modem_get_info(&mi) == ESP_OK && mi.present) {
+        cJSON_ReplaceItemInObject(cell, "operator", cJSON_CreateString(mi.operator_name));
+        cJSON_ReplaceItemInObject(cell, "network_mode", cJSON_CreateString(mi.network_mode));
+        cJSON_ReplaceItemInObject(cell, "imei", cJSON_CreateString(mi.imei));
+        cJSON_ReplaceItemInObject(cell, "iccid", cJSON_CreateString(mi.iccid));
+        char sig[32];
+        if (mi.rssi >= 0 && mi.rssi <= 31) {
+            const int dbm = -113 + (2 * mi.rssi);
+            snprintf(sig, sizeof(sig), "%d dBm", dbm);
+        } else {
+            snprintf(sig, sizeof(sig), "--");
+        }
+        cJSON_ReplaceItemInObject(cell, "signal", cJSON_CreateString(sig));
+    }
+#endif
     cJSON_AddItemToObject(root, "cellular", cell);
 
     cJSON *ifaces = cJSON_CreateArray();
@@ -1234,6 +1326,8 @@ static esp_err_t uri_network_config_get(httpd_req_t *req)
     load_lan_ui(&lan);
     uint8_t mode = 0;
     load_work_mode_u8(&mode);
+    const system_mode_profile_t *active = system_mode_manager_get_profile(mode);
+    uint8_t wan_type = active ? (uint8_t)active->wan_type : (uint8_t)SYSTEM_WAN_NONE;
     const char *tag = working_mode_tag_from_id(mode);
     nvs_handle_t h = 0;
     uint8_t w4g = 1;
@@ -1257,6 +1351,7 @@ static esp_err_t uri_network_config_get(httpd_req_t *req)
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "working_mode", uiwm);
     cJSON_AddNumberToObject(root, "work_mode_id", mode);
+    cJSON_AddNumberToObject(root, "wan_type", wan_type);
     cJSON *lanj = cJSON_CreateObject();
     cJSON_AddStringToObject(lanj, "ip", lan.ip);
     cJSON_AddStringToObject(lanj, "mask", lan.mask);
@@ -1294,8 +1389,22 @@ static esp_err_t uri_network_config_post(httpd_req_t *req)
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
     }
     cJSON *wmid = cJSON_GetObjectItem(root, "work_mode_id");
+    cJSON *wtype = cJSON_GetObjectItem(root, "wan_type");
+    uint8_t m = 0;
+    bool mode_selected = false;
     if (cJSON_IsNumber(wmid)) {
-        uint8_t m = (uint8_t)wmid->valuedouble;
+        m = (uint8_t)wmid->valuedouble;
+        mode_selected = true;
+    } else if (cJSON_IsNumber(wtype)) {
+        system_wan_type_t wt = (system_wan_type_t)((uint8_t)wtype->valuedouble);
+        m = pick_preferred_mode_for_wan_type(wt);
+        if (m == 0) {
+            cJSON_Delete(root);
+            return send_json(req, 400, "{\"status\":\"error\",\"message\":\"wan_type not available for this hardware\"}");
+        }
+        mode_selected = true;
+    }
+    if (mode_selected) {
         if (!system_mode_manager_get_profile(m)) {
             cJSON_Delete(root);
             return send_json(req, 400, "{\"status\":\"error\",\"message\":\"unknown work_mode_id\"}");
@@ -1314,6 +1423,10 @@ static esp_err_t uri_network_config_post(httpd_req_t *req)
         if (nvs_open(NVS_NS_WEBUI, NVS_READWRITE, &hh) == ESP_OK) {
             const char *tag = working_mode_tag_from_id(m);
             nvs_set_str(hh, NVS_KEY_UIWM, tag);
+            const system_mode_profile_t *pm = system_mode_manager_get_profile(m);
+            if (pm) {
+                nvs_set_u8(hh, NVS_KEY_WANTYPE, (uint8_t)pm->wan_type);
+            }
             nvs_commit(hh);
             nvs_close(hh);
         }
@@ -1329,6 +1442,15 @@ static esp_err_t uri_network_config_post(httpd_req_t *req)
             uint8_t mid = pick_mode_for_ui_working_mode(wm->valuestring);
             save_work_mode_u8(mid);
             system_mode_manager_apply(mid);
+            nvs_handle_t wh = 0;
+            if (nvs_open(NVS_NS_WEBUI, NVS_READWRITE, &wh) == ESP_OK) {
+                const system_mode_profile_t *pm = system_mode_manager_get_profile(mid);
+                if (pm) {
+                    nvs_set_u8(wh, NVS_KEY_WANTYPE, (uint8_t)pm->wan_type);
+                    nvs_commit(wh);
+                }
+                nvs_close(wh);
+            }
         }
     }
     cJSON *lanj = cJSON_GetObjectItem(root, "lan");
@@ -2294,15 +2416,9 @@ esp_err_t web_service_start(void)
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &config), TAG, "httpd start failed");
     ESP_RETURN_ON_ERROR(register_handlers(s_server), TAG, "register handlers failed");
 
-    // If previous STA config exists, apply once on boot.
-    char ssid[33] = {0};
-    char pwd[65] = {0};
-    if (load_sta_from_nvs(ssid, sizeof(ssid), pwd, sizeof(pwd)) == ESP_OK && strlen(ssid)) {
-        esp_err_t ret = apply_sta_config(ssid, pwd);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Apply saved STA failed: %s", esp_err_to_name(ret));
-        }
-    }
+    /* STA startup is owned by mode manager.
+     * Do not re-apply saved STA here, or it races with system_mode_manager_apply()
+     * during boot (can trigger WIFI_STATE errors and unstable STA netif state). */
 
     log_ring_append("[BOOT] web service ready");
     ESP_LOGI(TAG, "web service started");

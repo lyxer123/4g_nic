@@ -26,6 +26,20 @@ esp_err_t esp_bridge_wifi_set_config(wifi_interface_t interface, wifi_config_t *
 #endif
 
 #if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM)
+typedef struct {
+    bool present;
+    bool ppp_has_ip;
+    int rssi;
+    int ber;
+    int act;
+    char operator_name[32];
+    char network_mode[16];
+    char imei[24];
+    char imsi[24];
+    char iccid[32];
+    char module_name[32];
+} esp_bridge_modem_info_t;
+
 /**
 * @brief Create modem netif for bridge.
 *
@@ -39,6 +53,18 @@ esp_err_t esp_bridge_wifi_set_config(wifi_interface_t interface, wifi_config_t *
 *      - NULL: failed because some error occurred
 */
 esp_netif_t *esp_bridge_create_modem_netif(esp_netif_ip_info_t *ip_info, uint8_t mac[6], bool data_forwarding, bool enable_dhcps);
+
+/**
+ * @brief Query modem runtime information for web/dashboard display.
+ *
+ * @param[out] info output struct, always initialized by this API.
+ *
+ * @return
+ *      - ESP_OK: query succeeded (some optional fields may still be empty based on modem support)
+ *      - ESP_ERR_INVALID_ARG: info is NULL
+ *      - ESP_ERR_INVALID_STATE: modem DCE not created yet
+ */
+esp_err_t esp_bridge_modem_get_info(esp_bridge_modem_info_t *info);
 #endif
 
 #if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_STATION)

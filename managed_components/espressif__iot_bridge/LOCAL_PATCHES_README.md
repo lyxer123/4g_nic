@@ -4,6 +4,12 @@ Upstream `espressif/iot_bridge` is normally managed by the ESP-IDF Component Man
 **`idf.py update-dependencies` or re-resolving versions may overwrite files in this folder.**
 After an update, re-apply patches from git history or from the project’s documented diff.
 
+## Phase 1b: SPI dual-netif second attach must return ESP_OK
+
+`esp_bridge_eth_spi_init()` left `ret == ESP_FAIL` when attaching **ETH_WAN** after **ETH_LAN** (driver already
+started). That caused `esp_bridge_create_eth_netif()` to skip `esp_netif_up()` on ETH_WAN — DHCP toward the
+PC/shared adapter never ran. Fixed by returning `ESP_OK` on the attach-only path (`eth_is_start` already true).
+
 ## Phase 1 (done here): External + Forwarding Ethernet on one PHY
 
 **Goal:** Allow `BRIDGE_EXTERNAL_NETIF_ETHERNET` and `BRIDGE_DATA_FORWARDING_NETIF_ETHERNET`

@@ -43,16 +43,17 @@ static const char *TAG = "mode_mgr";
 
 static const system_mode_profile_t s_profiles[] = {
     {1, "4G -> Wi-Fi (SoftAP)", SYSTEM_WAN_USB_MODEM, true, false, false, false},
-    {2, "4G -> W5500 (ETH_LAN)", SYSTEM_WAN_USB_MODEM, false, true, false, false},
-    {3, "4G -> Wi-Fi + W5500", SYSTEM_WAN_USB_MODEM, true, true, false, false},
-    {4, "Wi-Fi STA -> SoftAP", SYSTEM_WAN_WIFI_STA, true, false, true, false},
-    {5, "Wi-Fi STA -> W5500 (ETH_LAN)", SYSTEM_WAN_WIFI_STA, false, true, true, false},
-    {6, "Wi-Fi STA -> Wi-Fi + W5500", SYSTEM_WAN_WIFI_STA, true, true, true, false},
-    {7, "W5500 WAN -> SoftAP", SYSTEM_WAN_W5500, true, false, false, true},
-    {8, "W5500 WAN -> W5500 (ETH_LAN)", SYSTEM_WAN_W5500, false, true, false, true},
-    {9, "W5500 WAN -> Wi-Fi + W5500", SYSTEM_WAN_W5500, true, true, false, true},
-    {10, "SoftAP + W5500 LAN (no USB WAN)", SYSTEM_WAN_NONE, true, true, false, false},
-    {11, "SoftAP only (provisioning)", SYSTEM_WAN_NONE, true, false, false, false},
+    {2, "4G 上行 -> W5500 内网(LAN)", SYSTEM_WAN_USB_MODEM, false, true, false, false},
+    {3, "4G 上行 -> 热点 + W5500(LAN)", SYSTEM_WAN_USB_MODEM, true, true, false, false},
+    {4, "Wi‑Fi STA 上行 -> 热点(LAN)", SYSTEM_WAN_WIFI_STA, true, false, true, false},
+    {5, "Wi‑Fi STA 上行 -> W5500 内网(LAN)", SYSTEM_WAN_WIFI_STA, false, true, true, false},
+    {6, "Wi‑Fi STA 上行 -> 热点 + W5500(LAN)", SYSTEM_WAN_WIFI_STA, true, true, true, false},
+    {7, "W5500 外网(WAN) -> 热点(LAN)", SYSTEM_WAN_W5500, true, false, false, true},
+    /* 单 PHY：W5500 不可同时作 WAN 与 ETH_LAN；8/9 仅占位，mode_allowed 会拒绝 */
+    {8, "(无效) W5500 WAN+LAN", SYSTEM_WAN_W5500, false, true, false, true},
+    {9, "(无效) W5500 WAN+热点+有线LAN", SYSTEM_WAN_W5500, true, true, false, true},
+    {10, "仅配网：热点 + W5500 内网(LAN)", SYSTEM_WAN_NONE, true, true, false, false},
+    {11, "仅配网：热点 (无上行)", SYSTEM_WAN_NONE, true, false, false, false},
 };
 
 static system_mode_status_t s_status = {
@@ -123,6 +124,11 @@ static esp_err_t apply_sta_if_needed(bool needed)
 {
     if (!needed) {
         (void)esp_wifi_disconnect();
+        esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (sta) {
+            (void)esp_netif_dhcpc_stop(sta);
+        }
+        ESP_LOGI(TAG, "STA: disconnect + dhcpc stopped (uplink is not Wi-Fi STA)");
         return ESP_OK;
     }
 
@@ -173,17 +179,26 @@ static bool str_to_ip4(const char *s, esp_ip4_addr_t *out)
 static esp_err_t apply_eth_wan_if_needed(bool needed)
 {
     esp_netif_t *eth_wan = esp_netif_get_handle_from_ifkey("ETH_WAN");
-    if (!eth_wan) return ESP_OK;
+    if (!eth_wan) {
+        if (needed) {
+            ESP_LOGW(TAG, "ETH_WAN netif missing (check SPI Ethernet + AUTO or Ext+Fwd Ethernet in sdkconfig)");
+            return ESP_ERR_NOT_FOUND;
+        }
+        return ESP_OK;
+    }
     if (!needed) {
-        /* Modes without W5500-WAN NVS profile must not touch ETH_WAN (avoids spurious dhcpc). */
+        /* RJ45 不作外网上行时：ETH_WAN 不得向上级要 IP（Wi-Fi/4G 作 WAN 或仅 W5500 作 LAN 时） */
+        (void)esp_netif_dhcpc_stop(eth_wan);
+        ESP_LOGI(TAG, "ETH_WAN: dhcpc stopped (uplink is not W5500 WAN)");
         return ESP_OK;
     }
 
     eth_wan_cfg_t cfg;
     load_eth_wan_cfg(&cfg);
     if (cfg.dhcp) {
+        (void)esp_netif_dhcpc_stop(eth_wan);
         esp_err_t e = esp_netif_dhcpc_start(eth_wan);
-        ESP_LOGI(TAG, "ETH_WAN use DHCP (from mode)");
+        ESP_LOGI(TAG, "ETH_WAN DHCP client (mode W5500-WAN): %s", esp_err_to_name(e));
         return e;
     }
 
@@ -241,6 +256,12 @@ bool system_mode_manager_mode_allowed(uint8_t mode)
     const system_mode_profile_t *p = system_mode_manager_get_profile(mode);
     if (!p) return false;
 
+#if !defined(CONFIG_BRIDGE_EXTERNAL_NETIF_STATION)
+    if (p->needs_sta) {
+        return false;
+    }
+#endif
+
 #if !CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM
     if (p->wan_type == SYSTEM_WAN_USB_MODEM) {
         return false;
@@ -258,6 +279,10 @@ bool system_mode_manager_mode_allowed(uint8_t mode)
 #endif
 
     if (p->wan_type == SYSTEM_WAN_USB_MODEM && !system_usb_cat1_detect_present()) {
+        return false;
+    }
+    /* 一路 W5500：外网口占用 PHY 时不能再划 ETH_LAN（仅 SOFTAP / 或他口上行时可有线 LAN） */
+    if (p->wan_type == SYSTEM_WAN_W5500 && p->lan_eth) {
         return false;
     }
     return true;
@@ -278,6 +303,7 @@ esp_err_t system_mode_manager_apply(uint8_t mode)
     if (!system_mode_manager_mode_allowed(mode)) {
         return ESP_ERR_INVALID_STATE;
     }
+    ESP_LOGI(TAG, "apply work_mode id=%u (%s)", (unsigned)mode, target->label ? target->label : "?");
 
     const system_mode_profile_t *prev = system_mode_manager_get_profile(s_status.current_mode);
     s_status.applying = true;
@@ -331,30 +357,34 @@ esp_err_t system_mode_manager_apply_saved(void)
 
 uint8_t system_mode_manager_pick_hw_default_mode(void)
 {
-    const bool usb = system_usb_cat1_detect_present();
-    const bool w5500 = system_w5500_detect_present();
+    (void)system_usb_cat1_detect_present();
+    (void)system_w5500_detect_present();
 
-#if CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM
-    const bool want_usb_wan = true;
-#else
-    const bool want_usb_wan = false;
-#endif
-#if defined(CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET) || defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
-    const bool want_eth = true;
-#else
-    const bool want_eth = false;
-#endif
-
-    if (want_usb_wan && usb && want_eth && w5500) {
-        return 3U;
-    }
-    if (want_usb_wan && usb) {
-        return 1U;
-    }
-    if (want_eth && w5500) {
-        return 10U;
+    /* Default WAN preference: W5500 > Wi-Fi STA > USB modem > AP-only provisioning. */
+    const uint8_t candidates[] = {7U, 4U, 1U, 11U, 10U};
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        if (system_mode_manager_mode_allowed(candidates[i])) {
+            return candidates[i];
+        }
     }
     return 11U;
+}
+
+void system_mode_manager_log_startup_plan(void)
+{
+    uint8_t mode = 0;
+    esp_err_t e = load_work_mode(&mode);
+    if (e == ESP_OK && system_mode_manager_get_profile(mode) && system_mode_manager_mode_allowed(mode)) {
+        const system_mode_profile_t *p = system_mode_manager_get_profile(mode);
+        ESP_LOGI(TAG, "NVS work_mode=%u — %s → will apply after netif init (e.g. W5500 WAN pulls DHCP; SoftAP=LAN)",
+                 (unsigned)mode, p && p->label ? p->label : "?");
+        return;
+    }
+    if (e == ESP_OK && system_mode_manager_get_profile(mode)) {
+        ESP_LOGW(TAG, "NVS work_mode=%u invalid for this HW/build → will fall back after netif init", (unsigned)mode);
+        return;
+    }
+    ESP_LOGI(TAG, "no work_mode in NVS → will use SoftAP provisioning (11) or HW fallback after netif init");
 }
 
 esp_err_t system_mode_manager_apply_saved_or_hw_default(void)
@@ -367,8 +397,14 @@ esp_err_t system_mode_manager_apply_saved_or_hw_default(void)
     if (e == ESP_OK && system_mode_manager_get_profile(mode)) {
         ESP_LOGW(TAG, "saved mode %u not allowed for hardware/build, using default", (unsigned)mode);
     }
-    mode = system_mode_manager_pick_hw_default_mode();
-    ESP_LOGI(TAG, "HW default work mode: %u", (unsigned)mode);
+    /* 无保存或不可用：优先可网页配网的纯热点，而不是「未选过就 W5500 LAN」(10) */
+    if (system_mode_manager_mode_allowed(11)) {
+        mode = 11U;
+        ESP_LOGI(TAG, "default work_mode: 11 (SoftAP provisioning; set WAN/LAN via web after connect)");
+    } else {
+        mode = system_mode_manager_pick_hw_default_mode();
+        ESP_LOGI(TAG, "mode 11 disallowed, HW default work mode: %u", (unsigned)mode);
+    }
     return system_mode_manager_apply(mode);
 }
 
