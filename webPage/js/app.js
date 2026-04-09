@@ -169,10 +169,118 @@
     }
   }
 
+  const WAN_TYPE_LABEL = {
+    0: '无上行（仅 SoftAP 配网）',
+    1: '4G / USB 蜂窝',
+    2: 'Wi‑Fi 连接上级（STA）',
+    3: '有线以太（W5500）',
+  };
+
+  let cachedModePayload = null;
+
+  function wanTypesFromModes(modes) {
+    const s = new Set();
+    for (let i = 0; i < modes.length; i++) {
+      s.add(Number(modes[i].wan_type));
+    }
+    return Array.from(s).sort((a, b) => a - b);
+  }
+
+  function modesForWanType(modes, wt) {
+    return modes.filter((m) => Number(m.wan_type) === Number(wt));
+  }
+
+  function lanSummaryLabel(m) {
+    const parts = [];
+    if (m.lan_softap) parts.push('热点');
+    if (m.lan_eth) parts.push('有线 LAN');
+    if (!parts.length) parts.push('无下行转发');
+    const title = m.label != null ? String(m.label) : '模式';
+    return title + '（' + parts.join(' + ') + '）';
+  }
+
+  function fillWanSelect(modes) {
+    const sel = $('selWanType');
+    if (!sel) return;
+    const types = wanTypesFromModes(modes);
+    if (!types.length) {
+      sel.innerHTML = '<option value="">— 无可用模式 —</option>';
+      return;
+    }
+    sel.innerHTML = types
+      .map((t) => '<option value="' + t + '">' + esc(WAN_TYPE_LABEL[t] || 'WAN ' + t) + '</option>')
+      .join('');
+  }
+
+  function fillModeSelect(modes, wt) {
+    const sel = $('selWorkMode');
+    if (!sel) return;
+    const list = modesForWanType(modes, wt);
+    if (!list.length) {
+      sel.innerHTML = '<option value="">—</option>';
+      return;
+    }
+    sel.innerHTML = list
+      .map((m) => '<option value="' + m.id + '">' + esc(lanSummaryLabel(m)) + '</option>')
+      .join('');
+  }
+
+  function setHwHint(hw) {
+    const el = $('hwProbeHint');
+    if (!el) return;
+    if (!hw) {
+      el.textContent = '';
+      return;
+    }
+    const bits = [];
+    bits.push('本机 Wi‑Fi 已具备');
+    bits.push('W5500：' + (hw.w5500 ? '已检测到' : '未检测到'));
+    bits.push('USB 蜂窝：' + (hw.usb_modem_present ? '已检测到（' + (hw.usb_ids || '') + '）' : '未检测到'));
+    el.textContent = bits.join(' · ');
+  }
+
+  function selectedModeRow() {
+    const sel = $('selWorkMode');
+    if (!sel || !sel.value || !cachedModePayload || !Array.isArray(cachedModePayload.modes)) {
+      return null;
+    }
+    const id = parseInt(sel.value, 10);
+    return cachedModePayload.modes.find((m) => Number(m.id) === id) || null;
+  }
+
   async function loadNetworkForm() {
-    const d = await jfetch(API.network, { method: 'GET' });
-    const wm = $('workingMode');
-    if (wm && d.working_mode) wm.value = d.working_mode;
+    const [d, md] = await Promise.all([jfetch(API.network, { method: 'GET' }), jfetch(API.mode, { method: 'GET' })]);
+    cachedModePayload = md;
+    const modes = Array.isArray(md.modes) ? md.modes : [];
+    setHwHint(md.hardware);
+
+    fillWanSelect(modes);
+    const curId = d.work_mode_id != null ? Number(d.work_mode_id) : Number(md.current) || 0;
+    let curMode = modes.find((m) => Number(m.id) === curId);
+    let wanT = curMode ? Number(curMode.wan_type) : null;
+    const types = wanTypesFromModes(modes);
+    if (wanT == null && types.length) {
+      wanT = types[0];
+    }
+    if (wanT != null && !types.includes(wanT) && types.length) {
+      wanT = types[0];
+    }
+    const wanSel = $('selWanType');
+    if (wanSel && wanT != null) {
+      wanSel.value = String(wanT);
+    }
+    if (wanT != null) {
+      fillModeSelect(modes, wanT);
+    }
+    const modeSel = $('selWorkMode');
+    if (modeSel && wanT != null) {
+      const sub = modesForWanType(modes, wanT);
+      const still = sub.some((m) => Number(m.id) === curId);
+      const pick = still ? curId : sub[0] ? Number(sub[0].id) : '';
+      if (pick !== '') {
+        modeSel.value = String(pick);
+      }
+    }
     const lan = d.lan || {};
     if ($('lanIp')) $('lanIp').value = lan.ip || '';
     if ($('lanMask')) $('lanMask').value = lan.mask || '';
@@ -189,15 +297,21 @@
   }
 
   function toggleStaPanel() {
-    const wm = $('workingMode');
+    const row = selectedModeRow();
     const sec = $('staAdvanced');
-    const v = wm && wm.value === 'router';
+    const v = row && row.needs_sta === true;
     if (sec) sec.classList.toggle('hidden', !v);
   }
 
   async function saveNetwork() {
+    const wmSel = $('selWorkMode');
+    const workId = wmSel && wmSel.value ? parseInt(wmSel.value, 10) : NaN;
+    if (!Number.isFinite(workId)) {
+      toast('请选择 LAN/工作模式', true);
+      return;
+    }
     const body = {
-      working_mode: $('workingMode') ? $('workingMode').value : '4g',
+      work_mode_id: workId,
       lan: {
         ip: $('lanIp').value.trim(),
         mask: $('lanMask').value.trim(),
@@ -591,7 +705,16 @@
   $('btnRefreshOverview') && $('btnRefreshOverview').addEventListener('click', () => loadOverview().catch((e) => toast(e.message, true)));
   $('btnRefreshUsers') && $('btnRefreshUsers').addEventListener('click', () => loadUsers().catch((e) => toast(e.message, true)));
   $('btnSaveNetwork') && $('btnSaveNetwork').addEventListener('click', () => saveNetwork().catch((e) => toast(e.message, true)));
-  $('workingMode') && $('workingMode').addEventListener('change', toggleStaPanel);
+  $('selWanType') &&
+    $('selWanType').addEventListener('change', () => {
+      const modes = cachedModePayload && Array.isArray(cachedModePayload.modes) ? cachedModePayload.modes : [];
+      const wt = parseInt($('selWanType').value, 10);
+      if (Number.isFinite(wt)) {
+        fillModeSelect(modes, wt);
+      }
+      toggleStaPanel();
+    });
+  $('selWorkMode') && $('selWorkMode').addEventListener('change', toggleStaPanel);
   $('btnSaveSta') && $('btnSaveSta').addEventListener('click', () => saveSta().catch((e) => toast(e.message, true)));
   $('btnLoadSta') && $('btnLoadSta').addEventListener('click', () => loadSta().catch((e) => toast(e.message, true)));
   $('btnScanSta') && $('btnScanSta').addEventListener('click', () => scanSta().catch((e) => toast(e.message, true)));

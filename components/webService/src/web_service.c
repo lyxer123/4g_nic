@@ -1293,17 +1293,43 @@ static esp_err_t uri_network_config_post(httpd_req_t *req)
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
     }
-    cJSON *wm = cJSON_GetObjectItem(root, "working_mode");
-    if (cJSON_IsString(wm)) {
+    cJSON *wmid = cJSON_GetObjectItem(root, "work_mode_id");
+    if (cJSON_IsNumber(wmid)) {
+        uint8_t m = (uint8_t)wmid->valuedouble;
+        if (!system_mode_manager_get_profile(m)) {
+            cJSON_Delete(root);
+            return send_json(req, 400, "{\"status\":\"error\",\"message\":\"unknown work_mode_id\"}");
+        }
+        if (!system_mode_manager_mode_allowed(m)) {
+            cJSON_Delete(root);
+            return send_json(req, 400, "{\"status\":\"error\",\"message\":\"work_mode not allowed for this hardware\"}");
+        }
+        esp_err_t mer = save_work_mode_u8(m);
+        if (mer != ESP_OK) {
+            cJSON_Delete(root);
+            return send_json(req, 400, "{\"status\":\"error\",\"message\":\"nvs save work_mode failed\"}");
+        }
+        (void)system_mode_manager_apply(m);
         nvs_handle_t hh = 0;
         if (nvs_open(NVS_NS_WEBUI, NVS_READWRITE, &hh) == ESP_OK) {
-            nvs_set_str(hh, NVS_KEY_UIWM, wm->valuestring);
+            const char *tag = working_mode_tag_from_id(m);
+            nvs_set_str(hh, NVS_KEY_UIWM, tag);
             nvs_commit(hh);
             nvs_close(hh);
         }
-        uint8_t mid = pick_mode_for_ui_working_mode(wm->valuestring);
-        save_work_mode_u8(mid);
-        system_mode_manager_apply(mid);
+    } else {
+        cJSON *wm = cJSON_GetObjectItem(root, "working_mode");
+        if (cJSON_IsString(wm)) {
+            nvs_handle_t hh = 0;
+            if (nvs_open(NVS_NS_WEBUI, NVS_READWRITE, &hh) == ESP_OK) {
+                nvs_set_str(hh, NVS_KEY_UIWM, wm->valuestring);
+                nvs_commit(hh);
+                nvs_close(hh);
+            }
+            uint8_t mid = pick_mode_for_ui_working_mode(wm->valuestring);
+            save_work_mode_u8(mid);
+            system_mode_manager_apply(mid);
+        }
     }
     cJSON *lanj = cJSON_GetObjectItem(root, "lan");
     if (cJSON_IsObject(lanj)) {

@@ -124,15 +124,16 @@
         <!-- 网络配置 -->
         <section class="page hidden" id="page-network" data-title="网络配置">
           <div class="card">
-            <div class="card-header">工作模式</div>
-            <div class="card-body">
+            <div class="card-header">工作模式（先选 WAN，再选本机 LAN 组合）</div>
+            <div class="card-body form-stack">
+              <p class="muted" id="hwProbeHint" style="margin:0 0 8px;font-size:13px;line-height:1.4;"></p>
               <div class="form-group">
-                <label for="workingMode">工作模式</label>
-                <select id="workingMode" class="input">
-                  <option value="4g">4G模式</option>
-                  <option value="router">路由模式（STA 上行）</option>
-                  <option value="ap">AP模式</option>
-                </select>
+                <label for="selWanType">WAN 上行</label>
+                <select id="selWanType" class="input"></select>
+              </div>
+              <div class="form-group">
+                <label for="selWorkMode">LAN / 具体模式</label>
+                <select id="selWorkMode" class="input"></select>
               </div>
             </div>
           </div>

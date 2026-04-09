@@ -18,7 +18,9 @@ if (CONFIG_BRIDGE_ETHERNET_NETIF_ENABLE)
     list(APPEND srcs "src/bridge_eth.c")
 endif()
 
-if (CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
+# Single-PHY dual netif (ETH_WAN + ETH_LAN): AUTO mode, or patched External+Forwarding pair together.
+if (CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN OR
+    (CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET AND CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET))
     list(APPEND srcs "src/esp_eth_netif_glue_wrap.c")
 endif()
 

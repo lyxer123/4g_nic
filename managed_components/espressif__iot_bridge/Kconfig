@@ -38,12 +38,13 @@ menu "Bridge Configuration"
 
         config BRIDGE_EXTERNAL_NETIF_ETHERNET
             depends on !BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN && BRIDGE_ETHERNET_NETIF_ENABLE
-            bool "Use ethernet interface to connect to the external network. Please disable BRIDGE_DATA_FORWARDING_NETIF_ETHERNET first"
+            bool "Use ethernet interface to connect to the external network"
             default n
             help
-                "BRIDGE_EXTERNAL_NETIF_ETHERNET" and "BRIDGE_DATA_FORWARDING_NETIF_ETHERNET" cannot be enabled simultaneously at the moment.
-                If using SPI Ethernet, ensure that the corresponding SPI Ethernet module configuration is enabled, e.g., CONFIG_ETH_SPI_ETHERNET_DM9051.
-                Path: Component config → Ethernet → Support SPI to Ethernet Module → DM9051
+                Patched in 4g_nic: may be enabled together with BRIDGE_DATA_FORWARDING_NETIF_ETHERNET on a
+                single PHY (e.g. W5500); the stack uses the same shared-MAC glue as "Ethernet AUTO WAN/LAN".
+                Still mutually exclusive with BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN (pick AUTO or External+Forwarding).
+                If using SPI Ethernet, enable the module under Component config → Ethernet, e.g. CONFIG_ETH_SPI_ETHERNET_W5500.
 
         config BRIDGE_EXTERNAL_NETIF_SPI
             bool "Use SPI interface to connect to the external network. Please note that SPI Netif and SDIO Netif cannot be enabled simultaneously."
@@ -125,12 +126,11 @@ menu "Bridge Configuration"
         config BRIDGE_DATA_FORWARDING_NETIF_ETHERNET
             depends on !BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN && BRIDGE_ETHERNET_NETIF_ENABLE
             bool "Use ethernet interface to provide network data forwarding for other devices"
-            depends on !BRIDGE_EXTERNAL_NETIF_ETHERNET
             default n
             help
-                "BRIDGE_EXTERNAL_NETIF_ETHERNET" and "BRIDGE_DATA_FORWARDING_NETIF_ETHERNET" cannot be enabled simultaneously at the moment.
-                If using SPI Ethernet, ensure that the corresponding SPI Ethernet module configuration is enabled, e.g., CONFIG_ETH_SPI_ETHERNET_DM9051.
-                Path: Component config → Ethernet → Support SPI to Ethernet Module → DM9051
+                Patched in 4g_nic: may be enabled together with BRIDGE_EXTERNAL_NETIF_ETHERNET on one SPI/EMAC PHY.
+                Mutually exclusive with BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN (pick AUTO or External+Forwarding pair).
+                If using SPI Ethernet, enable the module under Component config → Ethernet.
 
         config BRIDGE_DATA_FORWARDING_NETIF_SPI
             bool "Use SPI interface to provide network data forwarding for other devices. Please note that SPI Netif and SDIO Netif cannot be enabled simultaneously."

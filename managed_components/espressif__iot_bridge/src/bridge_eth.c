@@ -30,14 +30,20 @@
 
 #include "sdkconfig.h"
 
+/* Single PHY serving ETH_WAN + ETH_LAN: upstream AUTO, or 4g_nic patch (External + Forwarding Ethernet together). */
+#if (defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN) ||                                                \
+     (defined(CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET) && defined(CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET)))
+#define BRIDGE_ETH_USE_SHARED_MAC_GLUE 1
+#endif
+
 static const char *TAG = "bridge_eth";
 
 static esp_eth_phy_t *phy = NULL;
 
-#if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
+#ifdef BRIDGE_ETH_USE_SHARED_MAC_GLUE
 esp_eth_netif_glue_handle_t esp_bridge_eth_new_netif_glue(esp_eth_handle_t eth_hdl);
-esp_err_t esp_bridge_set_eth_lan_netif(esp_netif_t* netif);
-esp_err_t esp_bridge_set_eth_wan_netif(esp_netif_t* netif);
+esp_err_t esp_bridge_set_eth_lan_netif(esp_netif_t *netif);
+esp_err_t esp_bridge_set_eth_wan_netif(esp_netif_t *netif);
 #endif
 
 /**
@@ -175,7 +181,7 @@ esp_err_t esp_bridge_eth_init(esp_netif_t* eth_netif)
     }
 
     /* attach Ethernet driver to TCP/IP stack */
-#if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
+#ifdef BRIDGE_ETH_USE_SHARED_MAC_GLUE
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_bridge_eth_new_netif_glue(eth_handle)));
 #else
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handle)));
@@ -349,7 +355,7 @@ esp_err_t esp_bridge_eth_spi_init(esp_netif_t* eth_netif_spi)
         }));
 
         // attach Ethernet driver to TCP/IP stack
-#if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
+#ifdef BRIDGE_ETH_USE_SHARED_MAC_GLUE
         ESP_ERROR_CHECK(esp_netif_attach(eth_netif_spi, esp_bridge_eth_new_netif_glue(eth_handle_spi)));
 #else
         ESP_ERROR_CHECK(esp_netif_attach(eth_netif_spi, esp_eth_new_netif_glue(eth_handle_spi)));
@@ -449,9 +455,9 @@ esp_netif_t* esp_bridge_create_eth_netif(esp_netif_ip_info_t* ip_info, uint8_t m
     eth_config.base = &esp_netif_common_config;
 
     esp_netif_t* netif = esp_bridge_create_netif(&eth_config, ip_info, mac, enable_dhcps);
-    if (netif) {
+        if (netif) {
         esp_err_t eth_init_ret = ESP_FAIL;
-#if defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
+#ifdef BRIDGE_ETH_USE_SHARED_MAC_GLUE
         if (data_forwarding) {
             esp_bridge_set_eth_lan_netif(netif);
         } else {
