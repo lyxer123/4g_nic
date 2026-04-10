@@ -141,7 +141,8 @@ static void dump_eth_wan(const char *why)
 {
     esp_netif_t *wan = esp_netif_get_handle_from_ifkey("ETH_WAN");
     if (!wan) {
-        ESP_LOGW(TAG, "[%s] ETH_WAN netif missing (bridge not built with EXTERNAL_NETIF_ETHERNET?)", why);
+        /* Common when work_mode uses W5500 as ETH_LAN only (no ETH_WAN netif). */
+        ESP_LOGD(TAG, "[%s] ETH_WAN netif not present (expected on LAN-only modes)", why);
         return;
     }
 
@@ -271,6 +272,11 @@ static void on_eth_state(void *arg, esp_event_base_t base, int32_t id, void *dat
     (void)base;
     (void)data;
 
+    /* Single W5500: runtime has ETH_WAN xor ETH_LAN. WAN helpers only when WAN netif exists. */
+    if (!esp_netif_get_handle_from_ifkey("ETH_WAN")) {
+        return;
+    }
+
     if (id == ETHERNET_EVENT_CONNECTED) {
 #if CONFIG_SYSTEM_ETH_WAN_USE_STATIC_IP
         ESP_LOGI(TAG, "ETHERNET_EVENT_CONNECTED - apply static IP (Kconfig)");
@@ -317,6 +323,9 @@ static void on_ip_eth(void *arg, esp_event_base_t base, int32_t id, void *data)
 static void tick_timer(void *arg)
 {
     (void)arg;
+    if (!esp_netif_get_handle_from_ifkey("ETH_WAN")) {
+        return;
+    }
     dump_eth_wan("periodic");
 }
 

@@ -15,6 +15,7 @@
 #include "lwip/lwip_napt.h"
 
 #include "esp_event.h"
+#include "esp_eth.h"
 #include "esp_netif.h"
 #include "esp_netif_net_stack.h"
 #include "sdkconfig.h"
@@ -231,8 +232,33 @@ static void on_uplink_lost_ip(void *arg, esp_event_base_t base, int32_t id, void
     softap_dhcps_full_config();
 }
 
+/**
+ * When W5500 is ETH_LAN, cable hot-plug changes downstream switching/NAPT timing; refresh SoftAP DHCP + NAPT.
+ */
+static void on_eth_lan_link(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    (void)data;
+
+    /* Single W5500: only refresh when LAN role is up (no esp_netif_get_handle_from_eth_driver in IDF 5.2 headers here). */
+    if (!esp_netif_get_handle_from_ifkey("ETH_LAN")) {
+        return;
+    }
+    if (id != ETHERNET_EVENT_CONNECTED && id != ETHERNET_EVENT_DISCONNECTED) {
+        return;
+    }
+    ESP_LOGI(TAG, "ETH_LAN link %s → SoftAP DHCPS/NAPT refresh",
+             id == ETHERNET_EVENT_CONNECTED ? "up" : "down");
+    vTaskDelay(pdMS_TO_TICKS(80));
+    softap_dhcps_full_config();
+}
+
 void system_wifi_dual_connect_init(void)
 {
+    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ETHERNET_EVENT_CONNECTED, &on_eth_lan_link, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ETHERNET_EVENT_DISCONNECTED, &on_eth_lan_link, NULL));
+
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_uplink_got_ip, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &on_uplink_got_ip, NULL));
 #if CONFIG_LWIP_PPP_SUPPORT
