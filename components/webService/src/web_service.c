@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +42,12 @@ static bool s_running = false;
 static char s_log_ring[LOG_RING_LINES][LOG_LINE_MAX];
 static int s_log_ring_pos;
 static int s_log_ring_count;
+
+static bool httpd_recv_exact(httpd_req_t *req, char *buf, int len);
+static int httpd_post_body_length(httpd_req_t *req);
+static cJSON *parse_http_json_body(char *body);
+static cJSON *parse_http_json_body_loopback_fixup(char *body, size_t buf_cap);
+static char *http_recv_body_alloc(httpd_req_t *req, int max_len, size_t *buf_cap_out);
 
 static void log_ring_append(const char *line)
 {
@@ -699,18 +706,17 @@ static esp_err_t uri_wifi_get(httpd_req_t *req)
 static esp_err_t uri_wifi_post(httpd_req_t *req)
 {
     char body[256] = {0};
-    int len = req->content_len;
+    int len = httpd_post_body_length(req);
     if (len <= 0 || len >= (int)sizeof(body)) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    int r = httpd_req_recv(req, body, len);
-    if (r <= 0) {
+    if (!httpd_recv_exact(req, body, len)) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"recv failed\"}");
     }
-    body[r] = '\0';
 
-    cJSON *root = cJSON_Parse(body);
+    cJSON *root = parse_http_json_body_loopback_fixup(body, sizeof(body));
     if (!root) {
+        ESP_LOGW(TAG, "wifi/sta invalid json len=%u: %.200s", (unsigned)strlen(body), body);
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
     }
 
@@ -844,21 +850,18 @@ static esp_err_t uri_eth_wan_get(httpd_req_t *req)
 
 static esp_err_t uri_eth_wan_post(httpd_req_t *req)
 {
-    char body[320] = {0};
-    int len = req->content_len;
-    if (len <= 0 || len >= (int)sizeof(body)) {
+    size_t body_cap = 0;
+    char *body = http_recv_body_alloc(req, 512, &body_cap);
+    if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    int r = httpd_req_recv(req, body, len);
-    if (r <= 0) {
-        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"recv failed\"}");
-    }
-    body[r] = '\0';
-
-    cJSON *root = cJSON_Parse(body);
+    cJSON *root = parse_http_json_body_loopback_fixup(body, body_cap);
     if (!root) {
+        ESP_LOGW(TAG, "eth_wan invalid json len=%u", (unsigned)strlen(body));
+        free(body);
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
     }
+    free(body);
 
     cJSON *dhcp = cJSON_GetObjectItem(root, "dhcp");
     cJSON *ip = cJSON_GetObjectItem(root, "ip");
@@ -1073,17 +1076,15 @@ static esp_err_t uri_mode_get(httpd_req_t *req)
 static esp_err_t uri_mode_post(httpd_req_t *req)
 {
     char body[128] = {0};
-    int len = req->content_len;
+    int len = httpd_post_body_length(req);
     if (len <= 0 || len >= (int)sizeof(body)) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    int r = httpd_req_recv(req, body, len);
-    if (r <= 0) {
+    if (!httpd_recv_exact(req, body, len)) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"recv failed\"}");
     }
-    body[r] = '\0';
 
-    cJSON *root = cJSON_Parse(body);
+    cJSON *root = parse_http_json_body(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
     }
@@ -1116,17 +1117,16 @@ static esp_err_t uri_mode_apply_post(httpd_req_t *req)
 {
     char body[128] = {0};
     uint8_t m = 0;
-    if (req->content_len > 0) {
-        int len = req->content_len;
+    const int pblen = httpd_post_body_length(req);
+    if (pblen > 0) {
+        const int len = pblen;
         if (len >= (int)sizeof(body)) {
             return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
         }
-        int r = httpd_req_recv(req, body, len);
-        if (r <= 0) {
+        if (!httpd_recv_exact(req, body, len)) {
             return send_json(req, 400, "{\"status\":\"error\",\"message\":\"recv failed\"}");
         }
-        body[r] = '\0';
-        cJSON *root = cJSON_Parse(body);
+        cJSON *root = parse_http_json_body(body);
         if (!root) {
             return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
         }
@@ -1270,23 +1270,159 @@ static esp_err_t save_lan_ui(const lan_ui_cfg_t *c)
     return e;
 }
 
-static char *http_recv_body(httpd_req_t *req, int max_len)
+/**
+ * Use Content-Length header when present: loopback POST can set content_len too small
+ * (truncated JSON) or too large (extra bytes after JSON → cJSON_Parse fails).
+ */
+static int httpd_post_body_length(httpd_req_t *req)
 {
-    int len = req->content_len;
+    char val[24];
+    if (httpd_req_get_hdr_value_str(req, "Content-Length", val, sizeof(val)) == ESP_OK) {
+        int h = atoi(val);
+        if (h > 0) {
+            const int cl = req->content_len;
+            if (cl > 0 && cl != h) {
+                ESP_LOGW(TAG, "POST Content-Length=%d content_len=%d (using header)", h, cl);
+            }
+            return h;
+        }
+    }
+    return req->content_len;
+}
+
+static void json_body_trim_inplace(char *b)
+{
+    if (!b || !b[0]) {
+        return;
+    }
+    if ((unsigned char)b[0] == 0xef && (unsigned char)b[1] == 0xbb && (unsigned char)b[2] == 0xbf) {
+        memmove(b, b + 3, strlen(b + 3) + 1);
+    }
+    char *start = b;
+    while (*start && isspace((unsigned char)*start)) {
+        start++;
+    }
+    if (start != b) {
+        memmove(b, start, strlen(start) + 1);
+    }
+    size_t n = strlen(b);
+    while (n > 0 && isspace((unsigned char)b[n - 1])) {
+        b[--n] = '\0';
+    }
+}
+
+/**
+ * Parse POST JSON: trim BOM/outer space; use ParseWithOpts so strict cJSON_Parse does not
+ * fail when loopback leaves non-whitespace slack after the object in the recv buffer.
+ */
+static cJSON *parse_http_json_body(char *body)
+{
+    if (!body || !body[0]) {
+        return NULL;
+    }
+    json_body_trim_inplace(body);
+    const char *ep = NULL;
+    cJSON *root = cJSON_ParseWithOpts(body, &ep, (cJSON_bool)0);
+    if (!root) {
+        return NULL;
+    }
+    if (ep) {
+        while (*ep && isspace((unsigned char)*ep)) {
+            ep++;
+        }
+        if (*ep != '\0') {
+            cJSON_Delete(root);
+            return NULL;
+        }
+    }
+    return root;
+}
+
+/**
+ * 127.0.0.1 loopback POST 偶发少末尾字节。
+ * 1) 尝试在尾部补 1～多个 `}`（嵌套对象缺闭合、如 /api/network/config）。
+ * 2) 再试补 `"}`（字符串未闭合，如 STA 密码）。
+ */
+static cJSON *parse_http_json_body_loopback_fixup(char *body, size_t buf_cap)
+{
+    cJSON *root = parse_http_json_body(body);
+    if (root) {
+        return root;
+    }
+    size_t base = strlen(body);
+    if (base == 0 || buf_cap == 0 || !memchr(body, '{', base)) {
+        return NULL;
+    }
+
+    for (int n = 1; n <= 6; n++) {
+        if ((size_t)n + base + 1u > buf_cap) {
+            break;
+        }
+        body[base + (size_t)n - 1u] = '}';
+        body[base + (size_t)n] = '\0';
+        root = parse_http_json_body(body);
+        if (root) {
+            return root;
+        }
+    }
+    body[base] = '\0';
+
+    if (base > 0u && body[base - 1u] != '}' && body[base - 1u] != '"' && base + 3u <= buf_cap) {
+        body[base] = '"';
+        body[base + 1u] = '}';
+        body[base + 2u] = '\0';
+        root = parse_http_json_body(body);
+        if (root) {
+            return root;
+        }
+        body[base] = '\0';
+    }
+    return NULL;
+}
+
+/** Read exactly len bytes into buf; null-terminates buf[len]. buf must have len+1 bytes. */
+static bool httpd_recv_exact(httpd_req_t *req, char *buf, int len)
+{
+    int total = 0;
+    while (total < len) {
+        int r = httpd_req_recv(req, buf + total, len - total);
+        if (r <= 0) {
+            return false;
+        }
+        total += r;
+    }
+    buf[len] = '\0';
+    return true;
+}
+
+/**
+ * 读取 POST body；多分配 16 字节便于 loopback 截断时 parse_http_json_body_loopback_fixup。
+ * buf_cap_out 非空时写入 malloc 总长（= len + 1 + 16）。
+ */
+static char *http_recv_body_alloc(httpd_req_t *req, int max_len, size_t *buf_cap_out)
+{
+    int len = httpd_post_body_length(req);
     if (len <= 0 || len > max_len) {
         return NULL;
     }
-    char *buf = malloc((size_t)len + 1u);
+    const size_t cap = (size_t)len + 1u + 16u;
+    char *buf = malloc(cap);
     if (!buf) {
         return NULL;
     }
-    int r = httpd_req_recv(req, buf, len);
-    if (r <= 0) {
+    if (!httpd_recv_exact(req, buf, len)) {
         free(buf);
         return NULL;
     }
-    buf[r] = '\0';
+    if (buf_cap_out) {
+        *buf_cap_out = cap;
+    }
     return buf;
+}
+
+static char *http_recv_body(httpd_req_t *req, int max_len)
+{
+    return http_recv_body_alloc(req, max_len, NULL);
 }
 
 static uint8_t pick_mode_for_ui_working_mode(const char *wm)
@@ -1663,15 +1799,18 @@ static esp_err_t uri_network_config_get(httpd_req_t *req)
 
 static esp_err_t uri_network_config_post(httpd_req_t *req)
 {
-    char *body = http_recv_body(req, 2048);
+    size_t body_cap = 0;
+    char *body = http_recv_body_alloc(req, 2048, &body_cap);
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = cJSON_Parse(body);
-    free(body);
+    cJSON *root = parse_http_json_body_loopback_fixup(body, body_cap);
     if (!root) {
+        ESP_LOGW(TAG, "network/config invalid json len=%u", (unsigned)strlen(body));
+        free(body);
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
     }
+    free(body);
     cJSON *wmid = cJSON_GetObjectItem(root, "work_mode_id");
     cJSON *wtype = cJSON_GetObjectItem(root, "wan_type");
     uint8_t m = 0;
@@ -1836,7 +1975,7 @@ static esp_err_t uri_network_apn_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = cJSON_Parse(body);
+    cJSON *root = parse_http_json_body(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -1943,15 +2082,18 @@ static esp_err_t uri_wifi_ap_get(httpd_req_t *req)
 
 static esp_err_t uri_wifi_ap_post(httpd_req_t *req)
 {
-    char *body = http_recv_body(req, 1024);
+    size_t body_cap = 0;
+    char *body = http_recv_body_alloc(req, 1024, &body_cap);
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = cJSON_Parse(body);
-    free(body);
+    cJSON *root = parse_http_json_body_loopback_fixup(body, body_cap);
     if (!root) {
+        ESP_LOGW(TAG, "wifi/ap invalid json len=%u: %.200s", (unsigned)strlen(body), body);
+        free(body);
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
     }
+    free(body);
     wifi_config_t wcfg = {0};
     esp_wifi_get_config(WIFI_IF_AP, &wcfg);
 
@@ -2071,7 +2213,7 @@ static esp_err_t uri_system_probes_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = cJSON_Parse(body);
+    cJSON *root = parse_http_json_body(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2142,7 +2284,7 @@ static esp_err_t uri_system_time_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = cJSON_Parse(body);
+    cJSON *root = parse_http_json_body(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2168,7 +2310,7 @@ static esp_err_t uri_system_sync_time_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = cJSON_Parse(body);
+    cJSON *root = parse_http_json_body(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2232,7 +2374,7 @@ static esp_err_t uri_system_reboot_schedule_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = cJSON_Parse(body);
+    cJSON *root = parse_http_json_body(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2297,7 +2439,7 @@ static esp_err_t uri_system_login_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = cJSON_Parse(body);
+    cJSON *root = parse_http_json_body(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2334,7 +2476,7 @@ static esp_err_t uri_system_password_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = cJSON_Parse(body);
+    cJSON *root = parse_http_json_body(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2430,7 +2572,7 @@ static esp_err_t uri_system_config_import_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = cJSON_Parse(body);
+    cJSON *root = parse_http_json_body(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2527,7 +2669,7 @@ static esp_err_t uri_traffic_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = cJSON_Parse(body);
+    cJSON *root = parse_http_json_body(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");

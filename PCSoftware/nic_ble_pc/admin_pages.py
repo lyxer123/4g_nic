@@ -1,4 +1,4 @@
-"""Web-style admin pages: same REST API as webPage/js/app.js (HTTP). Serial/BLE stay on gui right for CLI/log."""
+"""Admin pages: same REST JSON as webPage/js/app.js, via UART PCAPI (device loopback HTTP)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from tkinter import messagebox, scrolledtext, ttk
 from typing import Any, Callable, Dict, List, Optional
 
-from .device_http import WebApiClient, WebApiError, normalize_base_url
+from .device_serial import SerialApiClient, SerialApiError
 
 # Paths match webPage/js/app.js API
 P_DASH = "/api/dashboard/overview"
@@ -20,6 +20,7 @@ P_APN = "/api/network/apn"
 P_WIFI_AP = "/api/wifi/ap"
 P_WIFI_STA = "/api/wifi"
 P_WIFI_CLEAR = "/api/wifi/clear"
+P_WIFI_SCAN = "/api/wifi/scan"
 P_MODE = "/api/mode"
 P_MODE_APPLY = "/api/mode/apply"
 P_ETH_WAN = "/api/eth_wan"
@@ -71,7 +72,7 @@ def lan_summary_label(m: dict) -> str:
 @dataclass
 class PageContext:
     root: tk.Misc
-    get_base: Callable[[], str]
+    get_client: Callable[[], SerialApiClient]
     log: Callable[[str], None]
     set_title: Callable[[str], None]
 
@@ -81,9 +82,12 @@ def _run_bg(root: tk.Misc, work: Callable[[], Any], ok: Callable[[Any], None], e
         try:
             r = work()
         except BaseException as e:
-            root.after(0, lambda: err(e))
+            # 3.11+ 在 except 结束后会清除 `e`；复制到另一局部变量再调度，避免 lambda 晚绑定的 NameError
+            captured_exc: BaseException = e
+            root.after(0, lambda: err(captured_exc))
             return
-        root.after(0, lambda: ok(r))
+        res_ok: Any = r
+        root.after(0, lambda: ok(res_ok))
 
     threading.Thread(target=wrap, daemon=True).start()
 
@@ -127,10 +131,14 @@ class AdminPages:
             "reboot": "重启",
         }
         self.ctx.set_title(titles.get(page_id, page_id))
+        if page_id == "network":
+            fn = getattr(self, "_network_on_show", None)
+            if callable(fn):
+                fn()
 
     # --- helpers ---
-    def _client(self) -> WebApiClient:
-        return WebApiClient(normalize_base_url(self.ctx.get_base()))
+    def _client(self) -> SerialApiClient:
+        return self.ctx.get_client()
 
     def _log(self, msg: str) -> None:
         self.ctx.log(msg)
@@ -222,11 +230,11 @@ class AdminPages:
 
             def ok(d: dict) -> None:
                 apply_dash(d if isinstance(d, dict) else {})
-                self._log("[HTTP] 总览已刷新")
+                self._log("[串口] 总览已刷新")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("总览", str(e))
-                self._log("[HTTP] 总览失败: " + str(e))
+                self._log("[串口] 总览失败: " + str(e))
 
             _run_bg(self.ctx.root, work, ok, er)
 
@@ -279,7 +287,7 @@ class AdminPages:
                     )
                 tot = d.get("total") if isinstance(d, dict) else None
                 foot.set(f"共 {tot if tot is not None else len(users)} 条")
-                self._log("[HTTP] 用户列表已刷新")
+                self._log("[串口] 用户列表已刷新")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("用户列表", str(e))
@@ -288,7 +296,7 @@ class AdminPages:
 
         ttk.Button(tbar, text="刷新", command=refresh).pack(side=tk.LEFT)
 
-    # --- network (simplified full parity with web save path) ---
+    # --- network (panel visibility / load / save order aligned with webPage/js/app.js) ---
     def _build_network(self) -> None:
         fr = ttk.LabelFrame(self._container, text="网络配置", padding=8)
         self.pages["network"] = fr
@@ -309,18 +317,26 @@ class AdminPages:
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         canv.configure(yscrollcommand=sb.set)
 
+        mode_top = ttk.LabelFrame(inner, text="工作模式（WAN + LAN）", padding=8)
+        mode_top.pack(fill=tk.X, pady=(0, 4))
         hw_hint = tk.StringVar(value="")
-        ttk.Label(inner, textvariable=hw_hint, foreground="gray", wraplength=520).pack(anchor=tk.W)
-        row1 = ttk.Frame(inner)
+        ttk.Label(mode_top, textvariable=hw_hint, foreground="gray", wraplength=520).pack(anchor=tk.W)
+        row1 = ttk.Frame(mode_top)
         row1.pack(fill=tk.X, pady=(6, 0))
-        ttk.Label(row1, text="WAN 上行").pack(side=tk.LEFT)
-        wan_combo = ttk.Combobox(row1, width=36, state="readonly")
+        ttk.Label(row1, text="WAN 上行（外网从哪走）").pack(side=tk.LEFT)
+        wan_combo = ttk.Combobox(row1, width=34, state="readonly")
         wan_combo.pack(side=tk.LEFT, padx=8)
-        row2 = ttk.Frame(inner)
+        row2 = ttk.Frame(mode_top)
         row2.pack(fill=tk.X, pady=(6, 0))
-        ttk.Label(row2, text="LAN 组合").pack(side=tk.LEFT)
-        mode_combo = ttk.Combobox(row2, width=36, state="readonly")
+        ttk.Label(row2, text="LAN 组合（内网）").pack(side=tk.LEFT)
+        mode_combo = ttk.Combobox(row2, width=34, state="readonly")
         mode_combo.pack(side=tk.LEFT, padx=8)
+        ttk.Label(
+            mode_top,
+            text="点击「刷新」从设备读取当前 WAN 上行与 LAN 组合；切换上方两个下拉框后，下方有线外网 / 无线配置 / 有线网络会联动显示（与网页一致）。",
+            foreground="gray",
+            wraplength=560,
+        ).pack(anchor=tk.W, pady=(8, 0))
 
         def set_hw(hw: Optional[dict]) -> None:
             if not hw:
@@ -338,51 +354,92 @@ class AdminPages:
             ]
             hw_hint.set(" · ".join(bits))
 
-        def refill_mode_combo() -> None:
-            md = self._mode_payload
-            if not md or not isinstance(md.get("modes"), list):
-                mode_combo["values"] = ()
-                return
-            try:
-                wt = int(wan_combo.get().split(":")[0])
-            except (ValueError, IndexError):
-                return
-            lst = modes_for_wan(md["modes"], wt)
-            mode_combo["values"] = tuple(f'{int(m["id"])}: {lan_summary_label(m)}' for m in lst)
+        # --- ETH WAN（顺序与 web 一致：先于无线组合） ---
+        ew_card = ttk.LabelFrame(inner, text="有线外网（ETH_WAN）", padding=8)
+        ew_dhcp = tk.BooleanVar(value=True)
+        ew_ip, ew_mask, ew_gw = tk.StringVar(), tk.StringVar(), tk.StringVar()
+        ew_d1, ew_d2 = tk.StringVar(), tk.StringVar()
+        ttk.Label(
+            ew_card,
+            text="当前模式为「有线网络连上级路由（WAN）」时配置本口；可与网页相同单独保存应用。",
+            foreground="gray",
+            wraplength=520,
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W)
+        ttk.Checkbutton(ew_card, text="DHCP 自动获取", variable=ew_dhcp).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(8, 2))
+        ttk.Label(ew_card, text="IP").grid(row=2, column=0, sticky=tk.W, pady=2)
+        ttk.Entry(ew_card, textvariable=ew_ip, width=22).grid(row=2, column=1, sticky=tk.W, padx=6)
+        ttk.Label(ew_card, text="掩码").grid(row=3, column=0, sticky=tk.W)
+        ttk.Entry(ew_card, textvariable=ew_mask, width=22).grid(row=3, column=1, sticky=tk.W, padx=6)
+        ttk.Label(ew_card, text="网关").grid(row=4, column=0, sticky=tk.W)
+        ttk.Entry(ew_card, textvariable=ew_gw, width=22).grid(row=4, column=1, sticky=tk.W, padx=6)
+        ttk.Label(ew_card, text="DNS1").grid(row=5, column=0, sticky=tk.W)
+        ttk.Entry(ew_card, textvariable=ew_d1, width=22).grid(row=5, column=1, sticky=tk.W, padx=6)
+        ttk.Label(ew_card, text="DNS2").grid(row=6, column=0, sticky=tk.W)
+        ttk.Entry(ew_card, textvariable=ew_d2, width=22).grid(row=6, column=1, sticky=tk.W, padx=6)
 
-        def on_wan_change(_: Any = None) -> None:
-            refill_mode_combo()
-            if mode_combo["values"]:
-                mode_combo.current(0)
-
-        wan_combo.bind("<<ComboboxSelected>>", on_wan_change)
-
-        # SoftAP
-        ap_card = ttk.LabelFrame(inner, text="无线配置（SoftAP）", padding=6)
-        ap_card.pack(fill=tk.X, pady=(10, 0))
-        ap_ssid = tk.StringVar()
-        ap_enc = tk.StringVar(value="WPA2-PSK")
-        ap_pwd = tk.StringVar()
-        ap_hid = tk.BooleanVar(value=False)
-        ttk.Label(ap_card, text="SSID").grid(row=0, column=0, sticky=tk.W)
-        ttk.Entry(ap_card, textvariable=ap_ssid, width=32).grid(row=0, column=1, sticky=tk.W, padx=6)
-        ttk.Label(ap_card, text="加密").grid(row=1, column=0, sticky=tk.W, pady=4)
-        ttk.Combobox(ap_card, textvariable=ap_enc, values=("WPA2-PSK", "WPA-PSK", "OPEN"), width=14, state="readonly").grid(
-            row=1, column=1, sticky=tk.W, padx=6, pady=4
-        )
-        ttk.Label(ap_card, text="密码").grid(row=2, column=0, sticky=tk.W)
-        ttk.Entry(ap_card, textvariable=ap_pwd, width=32, show="*").grid(row=2, column=1, sticky=tk.W, padx=6)
-        ttk.Checkbutton(ap_card, text="隐藏WiFi", variable=ap_hid).grid(row=3, column=1, sticky=tk.W)
-
-        # STA
-        sta_card = ttk.LabelFrame(inner, text="WiFi STA（连上级）", padding=6)
-        sta_card.pack(fill=tk.X, pady=(10, 0))
+        # --- 无线配置（STA + SoftAP 同卡，按模式显隐） ---
+        wireless_combo = ttk.LabelFrame(inner, text="无线配置", padding=8)
+        sta_inner = ttk.Frame(wireless_combo)
+        sta_divider = ttk.Separator(wireless_combo, orient=tk.HORIZONTAL)
+        ap_inner = ttk.Frame(wireless_combo)
         sta_ssid = tk.StringVar()
         sta_pwd = tk.StringVar()
-        ttk.Label(sta_card, text="SSID").grid(row=0, column=0, sticky=tk.W)
-        ttk.Entry(sta_card, textvariable=sta_ssid, width=28).grid(row=0, column=1, padx=6)
-        ttk.Label(sta_card, text="密码").grid(row=1, column=0, sticky=tk.W, pady=4)
-        ttk.Entry(sta_card, textvariable=sta_pwd, width=28, show="*").grid(row=1, column=1, padx=6, pady=4)
+        ttk.Label(sta_inner, text="WiFi STA（连接上级路由），SSID").grid(row=0, column=0, sticky=tk.W)
+        sta_row = ttk.Frame(sta_inner)
+        sta_row.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
+        ttk.Entry(sta_row, textvariable=sta_ssid, width=26).pack(side=tk.LEFT)
+
+        def scan_sta() -> None:
+            def work() -> dict:
+                return self._client().get(P_WIFI_SCAN)
+
+            def ok(d: dict) -> None:
+                aps = d.get("aps") if isinstance(d, dict) else []
+                if not isinstance(aps, list):
+                    aps = []
+                pop = tk.Toplevel(self.ctx.root)
+                pop.title("选择 SSID")
+                pop.transient(self.ctx.root)
+                lb = tk.Listbox(pop, width=40, height=min(16, max(4, len(aps) + 1)))
+                sb2 = ttk.Scrollbar(pop, orient=tk.VERTICAL, command=lb.yview)
+                lb.configure(yscrollcommand=sb2.set)
+                lb.grid(row=0, column=0, sticky="nsew")
+                sb2.grid(row=0, column=1, sticky="ns")
+                pop.grid_rowconfigure(0, weight=1)
+                pop.grid_columnconfigure(0, weight=1)
+                for it in aps:
+                    if not isinstance(it, dict):
+                        continue
+                    ss = str(it.get("ssid") or "")
+                    rs = it.get("rssi")
+                    lb.insert(tk.END, f"{ss} ({rs})" if rs is not None else ss)
+
+                def pick(_: Any = None) -> None:
+                    sel = lb.curselection()
+                    if not sel:
+                        return
+                    line = lb.get(sel[0])
+                    if "(" in line:
+                        line = line.rsplit("(", 1)[0].strip()
+                    sta_ssid.set(line)
+                    pop.destroy()
+
+                lb.bind("<Double-Button-1>", pick)
+                bf = ttk.Frame(pop, padding=6)
+                bf.grid(row=1, column=0, columnspan=2, sticky=tk.EW)
+                ttk.Button(bf, text="使用所选", command=pick).pack(side=tk.LEFT)
+                ttk.Button(bf, text="关闭", command=pop.destroy).pack(side=tk.RIGHT)
+
+            def er(e: BaseException) -> None:
+                messagebox.showerror("扫描", str(e))
+
+            _run_bg(self.ctx.root, work, ok, er)
+
+        ttk.Button(sta_row, text="扫描", command=scan_sta, width=8).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(sta_inner, text="密码").grid(row=2, column=0, sticky=tk.W, pady=(6, 0))
+        ttk.Entry(sta_inner, textvariable=sta_pwd, width=30, show="*").grid(row=3, column=0, sticky=tk.W, pady=(2, 0))
+        sta_btns = ttk.Frame(sta_inner)
+        sta_btns.grid(row=4, column=0, sticky=tk.W, pady=(8, 0))
 
         def load_sta() -> None:
             def work() -> dict:
@@ -391,7 +448,7 @@ class AdminPages:
             def ok(d: dict) -> None:
                 sta_ssid.set(str(d.get("ssid") or ""))
                 sta_pwd.set(str(d.get("password") or ""))
-                self._log("[HTTP] 已读取 STA")
+                self._log("[串口] 已读取 STA")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("STA", str(e))
@@ -399,6 +456,10 @@ class AdminPages:
             _run_bg(self.ctx.root, work, ok, er)
 
         def save_sta() -> None:
+            if not sta_ssid.get().strip():
+                messagebox.showwarning("STA", "请填写 SSID")
+                return
+
             def work() -> None:
                 self._client().post_json(
                     P_WIFI_STA,
@@ -407,14 +468,11 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("STA", "已保存")
-                self._log("[HTTP] STA 已保存")
+                self._log("[串口] STA 已保存")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("STA", str(e))
 
-            if not sta_ssid.get().strip():
-                messagebox.showwarning("STA", "请填写 SSID")
-                return
             _run_bg(self.ctx.root, work, ok, er)
 
         def clear_sta() -> None:
@@ -424,68 +482,61 @@ class AdminPages:
             def ok(_: Any) -> None:
                 sta_ssid.set("")
                 sta_pwd.set("")
-                self._log("[HTTP] STA 已清空")
+                self._log("[串口] STA 已清空")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("STA", str(e))
 
             _run_bg(self.ctx.root, work, ok, er)
 
-        sf = ttk.Frame(sta_card)
-        sf.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=6)
-        ttk.Button(sf, text="读取 STA", command=load_sta).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(sf, text="保存 STA", command=save_sta).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(sf, text="清空 STA", command=clear_sta).pack(side=tk.LEFT)
+        ttk.Button(sta_btns, text="保存 STA", command=save_sta).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(sta_btns, text="读取", command=load_sta).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(sta_btns, text="清空 STA", command=clear_sta).pack(side=tk.LEFT)
 
-        # ETH WAN
-        ew_card = ttk.LabelFrame(inner, text="有线外网（ETH_WAN，按模式显示）", padding=6)
-        ew_card.pack(fill=tk.X, pady=(10, 0))
-        ew_dhcp = tk.BooleanVar(value=True)
-        ew_ip, ew_mask, ew_gw = tk.StringVar(), tk.StringVar(), tk.StringVar()
-        ew_d1, ew_d2 = tk.StringVar(), tk.StringVar()
-        ttk.Checkbutton(ew_card, text="DHCP", variable=ew_dhcp).grid(row=0, column=0, sticky=tk.W)
-        ttk.Label(ew_card, text="IP").grid(row=1, column=0, sticky=tk.W, pady=2)
-        ttk.Entry(ew_card, textvariable=ew_ip, width=18).grid(row=1, column=1, sticky=tk.W, padx=6)
-        ttk.Label(ew_card, text="掩码").grid(row=2, column=0, sticky=tk.W)
-        ttk.Entry(ew_card, textvariable=ew_mask, width=18).grid(row=2, column=1, sticky=tk.W, padx=6)
-        ttk.Label(ew_card, text="网关").grid(row=3, column=0, sticky=tk.W)
-        ttk.Entry(ew_card, textvariable=ew_gw, width=18).grid(row=3, column=1, sticky=tk.W, padx=6)
-        ttk.Label(ew_card, text="DNS1").grid(row=4, column=0, sticky=tk.W)
-        ttk.Entry(ew_card, textvariable=ew_d1, width=18).grid(row=4, column=1, sticky=tk.W, padx=6)
-        ttk.Label(ew_card, text="DNS2").grid(row=5, column=0, sticky=tk.W)
-        ttk.Entry(ew_card, textvariable=ew_d2, width=18).grid(row=5, column=1, sticky=tk.W, padx=6)
+        ap_ssid = tk.StringVar()
+        ap_enc = tk.StringVar(value="WPA2-PSK")
+        ap_pwd = tk.StringVar()
+        ap_hid = tk.BooleanVar(value=False)
+        ttk.Label(ap_inner, text="WiFi 热点（SoftAP）").grid(row=0, column=0, sticky=tk.W)
+        ttk.Entry(ap_inner, textvariable=ap_ssid, width=32).grid(row=1, column=0, sticky=tk.W, pady=(4, 0))
+        ttk.Label(ap_inner, text="加密方式").grid(row=2, column=0, sticky=tk.W, pady=(6, 0))
+        ttk.Combobox(ap_inner, textvariable=ap_enc, values=("WPA2-PSK", "WPA-PSK", "OPEN"), width=14, state="readonly").grid(
+            row=3, column=0, sticky=tk.W
+        )
+        ttk.Label(ap_inner, text="WiFi 密码（页面不显示已保存；改加密时请重填）").grid(row=4, column=0, sticky=tk.W, pady=(6, 0))
+        ttk.Entry(ap_inner, textvariable=ap_pwd, width=32, show="*").grid(row=5, column=0, sticky=tk.W)
+        ttk.Checkbutton(ap_inner, text="隐藏 WiFi", variable=ap_hid).grid(row=6, column=0, sticky=tk.W, pady=(6, 0))
 
-        # LAN eth
-        lan_card = ttk.LabelFrame(inner, text="有线网络（LAN）", padding=6)
-        lan_card.pack(fill=tk.X, pady=(10, 0))
+        # --- 有线网络 LAN ---
+        lan_card = ttk.LabelFrame(inner, text="有线网络", padding=8)
         lan_ip, lan_mask = tk.StringVar(), tk.StringVar()
         lan_dhcp = tk.BooleanVar(value=True)
         lan_s, lan_e = tk.StringVar(), tk.StringVar()
         lan_d1, lan_d2 = tk.StringVar(), tk.StringVar()
         r = 0
-        ttk.Label(lan_card, text="IP").grid(row=r, column=0, sticky=tk.W)
-        ttk.Entry(lan_card, textvariable=lan_ip, width=18).grid(row=r, column=1, padx=6)
+        ttk.Label(lan_card, text="IP 地址").grid(row=r, column=0, sticky=tk.W)
+        ttk.Entry(lan_card, textvariable=lan_ip, width=22).grid(row=r, column=1, padx=6)
         r += 1
-        ttk.Label(lan_card, text="掩码").grid(row=r, column=0, sticky=tk.W)
-        ttk.Entry(lan_card, textvariable=lan_mask, width=18).grid(row=r, column=1, padx=6)
+        ttk.Label(lan_card, text="子网掩码").grid(row=r, column=0, sticky=tk.W)
+        ttk.Entry(lan_card, textvariable=lan_mask, width=22).grid(row=r, column=1, padx=6)
         r += 1
-        ttk.Checkbutton(lan_card, text="DHCP 服务器", variable=lan_dhcp).grid(row=r, column=0, columnspan=2, sticky=tk.W, pady=4)
+        ttk.Checkbutton(lan_card, text="DHCP", variable=lan_dhcp).grid(row=r, column=0, columnspan=2, sticky=tk.W, pady=4)
         r += 1
-        ttk.Label(lan_card, text="起始IP").grid(row=r, column=0, sticky=tk.W)
-        ttk.Entry(lan_card, textvariable=lan_s, width=18).grid(row=r, column=1, padx=6)
+        ttk.Label(lan_card, text="起始 IP").grid(row=r, column=0, sticky=tk.W)
+        ttk.Entry(lan_card, textvariable=lan_s, width=22).grid(row=r, column=1, padx=6)
         r += 1
-        ttk.Label(lan_card, text="结束IP").grid(row=r, column=0, sticky=tk.W)
-        ttk.Entry(lan_card, textvariable=lan_e, width=18).grid(row=r, column=1, padx=6)
+        ttk.Label(lan_card, text="结束 IP").grid(row=r, column=0, sticky=tk.W)
+        ttk.Entry(lan_card, textvariable=lan_e, width=22).grid(row=r, column=1, padx=6)
         r += 1
         ttk.Label(lan_card, text="DNS1").grid(row=r, column=0, sticky=tk.W)
-        ttk.Entry(lan_card, textvariable=lan_d1, width=18).grid(row=r, column=1, padx=6)
+        ttk.Entry(lan_card, textvariable=lan_d1, width=22).grid(row=r, column=1, padx=6)
         r += 1
         ttk.Label(lan_card, text="DNS2").grid(row=r, column=0, sticky=tk.W)
-        ttk.Entry(lan_card, textvariable=lan_d2, width=18).grid(row=r, column=1, padx=6)
+        ttk.Entry(lan_card, textvariable=lan_d2, width=22).grid(row=r, column=1, padx=6)
 
         def selected_mode_id() -> Optional[int]:
-            s = mode_combo.get()
-            if not s:
+            s = mode_combo.get().strip()
+            if not s or s.startswith("—"):
                 return None
             try:
                 return int(s.split(":", 1)[0].strip())
@@ -501,6 +552,64 @@ class AdminPages:
                     return m
             return None
 
+        def toggle_network_panels(_: Any = None) -> None:
+            for w in (ew_card, wireless_combo, lan_card):
+                w.pack_forget()
+            sta_inner.pack_forget()
+            sta_divider.pack_forget()
+            ap_inner.pack_forget()
+
+            mid = selected_mode_id()
+            row = mode_row_by_id(mid) if mid is not None else None
+            show_eth = row.get("lan_eth") is True if row else True
+            show_sta = row.get("needs_sta") is True if row else False
+            show_wifi = row.get("lan_softap") is True if row else False
+            show_eth_wan = row.get("needs_eth_wan") is True if row else False
+
+            if show_eth_wan:
+                ew_card.pack(fill=tk.X, pady=(10, 0))
+            if show_sta or show_wifi:
+                wireless_combo.pack(fill=tk.X, pady=(10, 0))
+                if show_sta:
+                    sta_inner.pack(fill=tk.X, anchor=tk.W)
+                if show_sta and show_wifi:
+                    sta_divider.pack(fill=tk.X, pady=8)
+                if show_wifi:
+                    ap_inner.pack(fill=tk.X, anchor=tk.W)
+            if show_eth:
+                lan_card.pack(fill=tk.X, pady=(10, 0))
+
+        def refill_mode_combo() -> None:
+            md = self._mode_payload
+            if not md or not isinstance(md.get("modes"), list):
+                mode_combo["values"] = ()
+                return
+            wv = wan_combo.get().strip()
+            if not wv or "无可用" in wv:
+                mode_combo["values"] = ()
+                return
+            try:
+                wt = int(wv.split(":")[0])
+            except (ValueError, IndexError):
+                mode_combo["values"] = ()
+                return
+            lst = modes_for_wan(md["modes"], wt)
+            if not lst:
+                mode_combo["values"] = ("—",)
+                return
+            mode_combo["values"] = tuple(f'{int(m["id"])}: {lan_summary_label(m)}' for m in lst)
+
+        skip_wan_combo_event = {"v": False}
+
+        def on_wan_change(_: Any = None) -> None:
+            if skip_wan_combo_event["v"]:
+                return
+            refill_mode_combo()
+            vals = mode_combo["values"]
+            if vals and (len(vals) != 1 or vals[0] != "—"):
+                mode_combo.current(0)
+            toggle_network_panels()
+
         def load_network() -> None:
             def work() -> tuple:
                 c = self._client()
@@ -510,11 +619,11 @@ class AdminPages:
                 ew = {}
                 try:
                     ap = c.get(P_WIFI_AP)
-                except WebApiError:
+                except SerialApiError:
                     pass
                 try:
                     ew = c.get(P_ETH_WAN)
-                except WebApiError:
+                except SerialApiError:
                     pass
                 return net, mode, ap, ew
 
@@ -535,7 +644,6 @@ class AdminPages:
                     if o and o.get("reason_code") and o["reason_code"] != "ok":
                         note = f'（{o["reason_code"]}）'
                     wan_labels.append(f'{t}: {WAN_TYPE_LABEL.get(t, "WAN " + str(t))}{note}')
-                wan_combo["values"] = tuple(wan_labels)
                 cur_id = None
                 if isinstance(net, dict):
                     if net.get("work_mode_id") is not None:
@@ -552,16 +660,31 @@ class AdminPages:
                     wan_t = wts[0]
                 if wan_t is not None and wts and wan_t not in wts:
                     wan_t = wts[0]
-                if wan_t is not None:
-                    idx = next((i for i, x in enumerate(wts) if x == wan_t), 0)
-                    if wan_combo["values"]:
-                        wan_combo.current(idx)
-                on_wan_change()
-                if cur_id is not None and mode_combo["values"]:
-                    for i, lbl in enumerate(mode_combo["values"]):
-                        if lbl.startswith(str(cur_id) + ":"):
-                            mode_combo.current(i)
-                            break
+                if not wts:
+                    wan_combo["values"] = ("— 无可用模式 —",)
+                    wan_combo.set("— 无可用模式 —")
+                    mode_combo["values"] = ()
+                else:
+                    wan_combo["values"] = tuple(wan_labels)
+                    skip_wan_combo_event["v"] = True
+                    try:
+                        if wan_t is not None:
+                            idx = next((i for i, x in enumerate(wts) if x == wan_t), 0)
+                            wan_combo.current(idx)
+                        refill_mode_combo()
+                        sub = modes_for_wan(modes, wan_t) if wan_t is not None else []
+                        still = cur_id is not None and any(int(m["id"]) == cur_id for m in sub)
+                        pick = cur_id if still else (int(sub[0]["id"]) if sub else None)
+                        if pick is not None and mode_combo["values"]:
+                            for i, lbl in enumerate(mode_combo["values"]):
+                                if lbl.startswith(str(pick) + ":"):
+                                    mode_combo.current(i)
+                                    break
+                        elif mode_combo["values"] and (len(mode_combo["values"]) != 1 or mode_combo["values"][0] != "—"):
+                            mode_combo.current(0)
+                    finally:
+                        skip_wan_combo_event["v"] = False
+                toggle_network_panels()
 
                 if isinstance(ew, dict):
                     ew_dhcp.set(ew.get("dhcp") is not False)
@@ -588,7 +711,7 @@ class AdminPages:
                     ap_pwd.set("")
                     ap_hid.set(bool(ap.get("hidden_ssid")))
 
-                self._log("[HTTP] 网络配置已读取")
+                self._log("[串口] 网络配置已读取")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("网络配置", str(e))
@@ -611,22 +734,26 @@ class AdminPages:
                 )
                 try:
                     c.post_json(P_MODE_APPLY, {})
-                except WebApiError:
+                except SerialApiError:
                     pass
 
             def ok(_: Any) -> None:
-                messagebox.showinfo("ETH WAN", "已保存并尝试应用")
-                self._log("[HTTP] 有线 WAN 已写")
+                messagebox.showinfo("ETH WAN", "有线 WAN 已写入，并已按当前工作模式重试应用")
+                self._log("[串口] 有线 WAN 已写")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("ETH WAN", str(e))
 
             _run_bg(self.ctx.root, work, ok, er)
 
+        ttk.Button(ew_card, text="仅保存有线 WAN 参数并应用", command=save_eth_wan_only).grid(
+            row=7, column=0, columnspan=2, sticky=tk.W, pady=(12, 0)
+        )
+
         def save_network() -> None:
             mid = selected_mode_id()
             if mid is None:
-                messagebox.showwarning("网络", "请选择 LAN 组合")
+                messagebox.showwarning("网络", "请选择 LAN/工作模式")
                 return
             row_pre = mode_row_by_id(mid)
             enc = ap_enc.get()
@@ -660,7 +787,13 @@ class AdminPages:
                             "dns2": ew_d2.get().strip(),
                         },
                     )
-                wt = int(wan_combo.get().split(":")[0])
+                wv = wan_combo.get().strip()
+                if not wv or "无可用" in wv:
+                    raise SerialApiError("无可用 WAN 类型")
+                try:
+                    wt = int(wv.split(":")[0])
+                except ValueError as exc:
+                    raise SerialApiError("WAN 选择无效") from exc
                 body = {
                     "work_mode_id": mid,
                     "wan_type": wt,
@@ -678,7 +811,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("网络", "网络配置已保存")
-                self._log("[HTTP] /api/network/config 已 POST")
+                self._log("[串口] /api/network/config 已 POST")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("网络", str(e))
@@ -686,10 +819,19 @@ class AdminPages:
             _run_bg(self.ctx.root, work, ok, er)
 
         btnf = ttk.Frame(inner)
+
+        def on_mode_combo_change(_: Any = None) -> None:
+            """与网页 selWorkMode 一致：仅按当前 work_mode 行切换面板，不改 WAN 子列表。"""
+            toggle_network_panels()
+
+        wan_combo.bind("<<ComboboxSelected>>", on_wan_change)
+        mode_combo.bind("<<ComboboxSelected>>", on_mode_combo_change)
+        self._network_on_show = load_network
+
+        toggle_network_panels()
         btnf.pack(fill=tk.X, pady=(24, 8))
-        ttk.Button(btnf, text="从设备读取", command=load_network).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(btnf, text="保存网络配置", command=save_network).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(btnf, text="仅保存有线 WAN 并应用", command=save_eth_wan_only).pack(side=tk.LEFT)
+        ttk.Button(btnf, text="刷新", command=load_network).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btnf, text="保存", width=12, command=save_network).pack(side=tk.LEFT)
 
     def _build_apn(self) -> None:
         fr = ttk.LabelFrame(self._container, text="APN设置", padding=8)
@@ -710,7 +852,7 @@ class AdminPages:
                 a.set(str(d.get("apn") or ""))
                 u.set(str(d.get("username") or ""))
                 p.set(str(d.get("password") or ""))
-                self._log("[HTTP] APN 已读取")
+                self._log("[串口] APN 已读取")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("APN", str(e))
@@ -723,7 +865,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("APN", "已保存")
-                self._log("[HTTP] APN 已保存")
+                self._log("[串口] APN 已保存")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("APN", str(e))
@@ -756,7 +898,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("密码", "已更新")
-                self._log("[HTTP] 管理密码已更新")
+                self._log("[串口] 管理密码已更新")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("密码", str(e))
@@ -795,7 +937,7 @@ class AdminPages:
                 tzz = d.get("timezone")
                 if tzz:
                     tz.set(str(tzz))
-                self._log("[HTTP] 系统时间已读取")
+                self._log("[串口] 系统时间已读取")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("时间", str(e))
@@ -821,7 +963,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("时间", "时区已保存")
-                self._log("[HTTP] 时区已保存")
+                self._log("[串口] 时区已保存")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("时间", str(e))
@@ -848,7 +990,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("出厂", "已执行，请重启设备")
-                self._log("[HTTP] factory_reset")
+                self._log("[串口] factory_reset")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("出厂", str(e))
@@ -867,7 +1009,7 @@ class AdminPages:
             def ok(d: dict) -> None:
                 txt.delete("1.0", tk.END)
                 txt.insert(tk.END, json.dumps(d, ensure_ascii=False, indent=2))
-                self._log("[HTTP] 已生成备份 JSON")
+                self._log("[串口] 已生成备份 JSON")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("备份", str(e))
@@ -893,7 +1035,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("导入", "导入成功")
-                self._log("[HTTP] 配置已导入")
+                self._log("[串口] 配置已导入")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("导入", str(e))
@@ -924,7 +1066,7 @@ class AdminPages:
                     logs = []
                 box.delete("1.0", tk.END)
                 box.insert(tk.END, "\n".join(str(x) for x in logs) if logs else "(无)")
-                self._log("[HTTP] 系统日志已刷新")
+                self._log("[串口] 系统日志已刷新")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("日志", str(e))
@@ -963,7 +1105,7 @@ class AdminPages:
                 p2.set(str(d.get("detection_ip2") or ""))
                 p3.set(str(d.get("detection_ip3") or ""))
                 p4.set(str(d.get("detection_ip4") or ""))
-                self._log("[HTTP] 探测地址已读取")
+                self._log("[串口] 探测地址已读取")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("探测", str(e))
@@ -984,7 +1126,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("探测", "已保存")
-                self._log("[HTTP] probes 已保存")
+                self._log("[串口] probes 已保存")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("探测", str(e))
@@ -1008,12 +1150,12 @@ class AdminPages:
             def work() -> None:
                 try:
                     self._client().post_json(P_REBOOT, {})
-                except WebApiError:
+                except SerialApiError:
                     pass
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("重启", "已发送重启指令")
-                self._log("[HTTP] reboot POST")
+                self._log("[串口] reboot POST")
 
             def er(e: BaseException) -> None:
                 messagebox.showwarning("重启", str(e))
@@ -1059,7 +1201,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("定时重启", "已保存")
-                self._log("[HTTP] reboot schedule saved")
+                self._log("[串口] reboot schedule saved")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("定时重启", str(e))

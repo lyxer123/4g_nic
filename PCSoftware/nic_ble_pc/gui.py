@@ -1,104 +1,246 @@
-"""Tkinter UI: Web-style admin only (HTTP)."""
+"""Tkinter UI: Web-parity admin over UART (PCAPI). Menubar navigation; serial log on the right."""
 
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import messagebox, ttk
-from typing import Any
+from tkinter import PanedWindow, messagebox, ttk
+from typing import Callable, Optional
 
 from .admin_pages import AdminPages, PageContext
-from .device_http import WebApiClient, normalize_base_url
+from .device_serial import SerialApiClient, SerialApiError, SerialMux, list_com_ports
+from .log_view import ColoredLog
+
+BASE_TITLE = "4G NIC — 网络管理（串口）"
 
 
 def run() -> None:
     root = tk.Tk()
-    root.title("4G NIC — 网络管理")
+    root.title(BASE_TITLE)
     root.minsize(1180, 620)
 
-    main_h = ttk.PanedWindow(root, orient=tk.HORIZONTAL)
+    # 经典 PanedWindow：中间有可拖拽的分隔条（sash），左右按比例伸缩
+    main_h = PanedWindow(
+        root,
+        orient=tk.HORIZONTAL,
+        sashwidth=6,
+        sashrelief=tk.GROOVE,
+        sashpad=2,
+        bd=0,
+    )
     main_h.pack(fill=tk.BOTH, expand=True)
 
-    work = ttk.PanedWindow(main_h, orient=tk.HORIZONTAL)
-    main_h.add(work, weight=3)
+    center_col = ttk.Frame(main_h, padding=8)
+    main_h.add(center_col, minsize=360, stretch="always")
 
-    nav_fr = ttk.Frame(work, width=200, padding=(6, 6, 0, 6))
-    work.add(nav_fr, weight=0)
+    right = ttk.Frame(main_h, padding=(6, 8, 8, 8))
+    main_h.add(right, minsize=260, stretch="always")
 
-    center_col = ttk.Frame(work, padding=8)
-    work.add(center_col, weight=2)
+    def _initial_sash_once(_e: tk.Event | None = None) -> None:
+        w = main_h.winfo_width()
+        h = max(1, main_h.winfo_height())
+        if w < 200:
+            return
+        # Python 3.11+ 的 PanedWindow 无 sashpos，用 Tcl 层的 sash_place（x 为水平分割位置）
+        x = max(360, min(int(w * 0.62), w - 280))
+        main_h.sash_place(0, x, h // 2)
+        main_h.unbind("<Map>")
 
-    base_url_var = tk.StringVar(value="http://192.168.5.1")
-    url_row = ttk.Frame(center_col)
-    url_row.pack(fill=tk.X)
-    ttk.Label(url_row, text="设备 Web 基址").pack(side=tk.LEFT)
-    ttk.Entry(url_row, textvariable=base_url_var, width=32).pack(side=tk.LEFT, padx=6)
+    main_h.bind("<Map>", _initial_sash_once, add=True)
 
-    def test_http() -> None:
-        try:
-            WebApiClient(normalize_base_url(base_url_var.get())).get("/api/mode")
-            messagebox.showinfo("HTTP", "连接正常（已读到 /api/mode）")
-        except BaseException as e:
-            messagebox.showerror("HTTP", str(e))
+    log_lf = ttk.LabelFrame(right, text="串口信息", padding=(0, 4, 0, 0))
+    log_lf.pack(fill=tk.BOTH, expand=True)
+    log_view = ColoredLog(log_lf, max_lines=900, font=("Consolas", 9))
+    log_view.pack(fill=tk.BOTH, expand=True)
 
-    ttk.Button(url_row, text="测试连接", command=test_http).pack(side=tk.LEFT)
+    def log_serial(msg: str) -> None:
+        root.after(0, lambda m=msg: log_view.append_line(m, source="serial"))
+
+    mux = SerialMux(log_line=log_serial, default_timeout_s=120.0)
+    api_holder: dict[str, Optional[SerialApiClient]] = {"c": None}
+
+    def get_client() -> SerialApiClient:
+        c = api_holder["c"]
+        if c is None:
+            raise SerialApiError("请先连接串口（菜单 → 连接设置）")
+        return c
+
+    connected = {"v": False}
+    connection_label = {"port": "", "baud": ""}
+    # 连接设置对话框创建早于 menubar，用 ref 挂接「业务菜单」启用/禁用
+    menu_enable_ref: dict[str, Callable[[bool], None]] = {}
+
+    def refresh_window_title() -> None:
+        if connected["v"] and connection_label["port"]:
+            root.title(
+                f"{BASE_TITLE}  |  串口 {connection_label['port']}  {connection_label['baud']} baud"
+            )
+        else:
+            root.title(BASE_TITLE)
+
+    def show_connection_dialog() -> None:
+        dlg = tk.Toplevel(root)
+        dlg.title("连接设置")
+        dlg.resizable(False, False)
+        dlg.transient(root)
+        dlg.grab_set()
+
+        conn = ttk.LabelFrame(dlg, text="连接", padding=10)
+        conn.pack(fill=tk.X, padx=10, pady=(10, 0))
+        ttk.Label(conn, text="串口").grid(row=0, column=0, sticky=tk.W)
+        port_var = tk.StringVar()
+        port_combo = ttk.Combobox(conn, textvariable=port_var, width=22, state="readonly")
+        port_combo.grid(row=0, column=1, sticky=tk.EW, padx=(8, 0))
+        ttk.Label(conn, text="波特率").grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
+        baud_var = tk.StringVar(value="115200")
+        baud_ent = ttk.Entry(conn, textvariable=baud_var, width=12)
+        baud_ent.grid(row=1, column=1, sticky=tk.W, padx=(8, 0), pady=(8, 0))
+        conn.columnconfigure(1, weight=1)
+
+        ble_fr = ttk.LabelFrame(dlg, text="蓝牙", padding=10)
+        ble_fr.pack(fill=tk.X, padx=10, pady=(10, 0))
+        ttk.Label(ble_fr, text="暂未启用（后续版本）", foreground="gray").pack(anchor=tk.W)
+        ttk.Button(ble_fr, text="连接蓝牙设备…", state=tk.DISABLED).pack(anchor=tk.W, pady=(6, 0))
+
+        btn_row = ttk.Frame(dlg, padding=(10, 10, 10, 6))
+        btn_row.pack(fill=tk.X)
+
+        def refresh_ports() -> None:
+            ports = [p[0] for p in list_com_ports()]
+            port_combo["values"] = ports
+            if ports and port_var.get() not in ports:
+                port_var.set(ports[0])
+            elif not ports:
+                port_var.set("")
+
+        def set_controls_connected(v: bool) -> None:
+            port_combo.configure(state=tk.DISABLED if v else "readonly")
+            baud_ent.configure(state=tk.DISABLED if v else "normal")
+            btn_rf.configure(state=tk.DISABLED if v else "normal")
+            btn_conn.configure(text="断开串口" if v else "连接串口")
+
+        def do_connect() -> None:
+            if connected["v"]:
+                mux.close()
+                api_holder["c"] = None
+                connected["v"] = False
+                connection_label["port"] = ""
+                connection_label["baud"] = ""
+                refresh_window_title()
+                set_controls_connected(False)
+                log_serial("[GUI] 串口已断开")
+                fn = menu_enable_ref.get("set_admin_menus")
+                if fn:
+                    fn(False)
+                return
+            p = port_var.get().strip()
+            if not p:
+                messagebox.showwarning("串口", "请选择 COM 口", parent=dlg)
+                return
+            try:
+                baud = int(baud_var.get().strip() or "115200")
+            except ValueError:
+                messagebox.showerror("串口", "波特率无效", parent=dlg)
+                return
+            try:
+                mux.open(p, baud)
+                api_holder["c"] = SerialApiClient(mux, timeout_s=120.0)
+                connected["v"] = True
+                connection_label["port"] = p
+                connection_label["baud"] = str(baud)
+                refresh_window_title()
+                set_controls_connected(True)
+                log_serial(f"[GUI] 已打开 {p} @ {baud}")
+                fn = menu_enable_ref.get("set_admin_menus")
+                if fn:
+                    fn(True)
+            except Exception as e:
+                messagebox.showerror("串口", str(e), parent=dlg)
+                api_holder["c"] = None
+
+        btn_rf = ttk.Button(btn_row, text="刷新列表", command=refresh_ports)
+        btn_rf.pack(side=tk.LEFT, padx=(0, 8))
+        btn_conn = ttk.Button(btn_row, text="连接串口", command=do_connect)
+        btn_conn.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_row, text="关闭", command=dlg.destroy).pack(side=tk.RIGHT)
+
+        refresh_ports()
+        if connected["v"]:
+            set_controls_connected(True)
+            if connection_label["port"]:
+                port_var.set(connection_label["port"])
+            baud_var.set(connection_label["baud"] or "115200")
+
+        dlg.wait_window()
+
+    menubar = tk.Menu(root)
+    root.config(menu=menubar)
+
+    menubar.add_command(label="连接设置…", command=show_connection_dialog)
+
+    m_status = tk.Menu(menubar, tearoff=0)
+    menubar.add_cascade(label="状态", menu=m_status)
+    m_net = tk.Menu(menubar, tearoff=0)
+    menubar.add_cascade(label="网络配置", menu=m_net)
+    m_sys = tk.Menu(menubar, tearoff=0)
+    menubar.add_cascade(label="系统管理", menu=m_sys)
+
+    i_status = menubar.index("状态")
+    i_net = menubar.index("网络配置")
+    i_sys = menubar.index("系统管理")
+
+    def set_admin_menus_enabled(en: bool) -> None:
+        st = tk.NORMAL if en else tk.DISABLED
+        menubar.entryconfigure(i_status, state=st)
+        menubar.entryconfigure(i_net, state=st)
+        menubar.entryconfigure(i_sys, state=st)
+
+    menu_enable_ref["set_admin_menus"] = set_admin_menus_enabled
+    set_admin_menus_enabled(connected["v"])
+
+    page_title_var = tk.StringVar(value="总览")
+    ttk.Label(center_col, textvariable=page_title_var, font=("Segoe UI", 13, "bold")).pack(anchor=tk.W, pady=(0, 6))
     ttk.Label(
         center_col,
-        text="各管理页与浏览器网页使用相同 REST API。已临时移除 BLE/串口调试功能以提升稳定性。",
+        text="管理数据经串口 PCAPI 与设备内 Web 服务相同接口。请使用菜单「连接设置」打开串口。",
         foreground="gray",
-        wraplength=560,
-    ).pack(anchor=tk.W, pady=(4, 0))
-    page_title_var = tk.StringVar(value="总览")
-    ttk.Label(center_col, textvariable=page_title_var, font=("Segoe UI", 13, "bold")).pack(anchor=tk.W, pady=(8, 0))
+        wraplength=620,
+    ).pack(anchor=tk.W)
     page_holder = ttk.Frame(center_col)
-    page_holder.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
-
-    nav_wrap = ttk.Frame(nav_fr)
-    nav_wrap.pack(fill=tk.BOTH, expand=True)
-    tv = ttk.Treeview(nav_wrap, show="tree", selectmode="browse")
-    tv.heading("#0", text="网络管理")
-    ys = ttk.Scrollbar(nav_wrap, orient=tk.VERTICAL, command=tv.yview)
-    tv.configure(yscrollcommand=ys.set)
-    tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    ys.pack(side=tk.RIGHT, fill=tk.Y)
-
-    tv.insert("", tk.END, "g_status", text="状态", open=True)
-    tv.insert("g_status", tk.END, "overview", text="总览")
-    tv.insert("g_status", tk.END, "users", text="用户列表")
-    tv.insert("", tk.END, "g_net", text="网络配置", open=True)
-    tv.insert("g_net", tk.END, "network", text="网络配置")
-    tv.insert("g_net", tk.END, "apn", text="APN设置")
-    tv.insert("", tk.END, "g_sys", text="系统管理", open=True)
-    tv.insert("g_sys", tk.END, "password", text="管理密码")
-    tv.insert("g_sys", tk.END, "systime", text="系统时间")
-    tv.insert("g_sys", tk.END, "upgrade", text="升级/复位")
-    tv.insert("g_sys", tk.END, "logs", text="系统日志")
-    tv.insert("g_sys", tk.END, "probes", text="网络检测")
-    tv.insert("g_sys", tk.END, "reboot", text="重启")
+    page_holder.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
 
     ctx = PageContext(
         root=root,
-        get_base=lambda: base_url_var.get().strip(),
-        log=lambda _s: None,
+        get_client=get_client,
+        log=log_serial,
         set_title=page_title_var.set,
     )
     admin = AdminPages(page_holder, ctx)
+
+    def nav(page_id: str) -> None:
+        admin.show(page_id)
+
+    m_status.add_command(label="总览", command=lambda: nav("overview"))
+    m_status.add_command(label="用户列表", command=lambda: nav("users"))
+    m_net.add_command(label="网络配置", command=lambda: nav("network"))
+    m_net.add_command(label="APN设置", command=lambda: nav("apn"))
+    m_sys.add_command(label="管理密码", command=lambda: nav("password"))
+    m_sys.add_command(label="系统时间", command=lambda: nav("systime"))
+    m_sys.add_command(label="升级/复位", command=lambda: nav("upgrade"))
+    m_sys.add_command(label="系统日志", command=lambda: nav("logs"))
+    m_sys.add_command(label="网络检测", command=lambda: nav("probes"))
+    m_sys.add_command(label="重启", command=lambda: nav("reboot"))
+
     admin.show("overview")
-
-    def on_nav_select(_: Any) -> None:
-        sel = tv.selection()
-        if not sel:
-            return
-        iid = sel[0]
-        if tv.get_children(iid):
-            return
-        admin.show(iid)
-
-    tv.bind("<<TreeviewSelect>>", on_nav_select)
-    tv.selection_set("overview")
 
     ttk.Label(
         root,
-        text="已临时移除 BLE 与串口 CLI 调试入口；当前仅保留 Web 管理页（HTTP）功能。",
+        text="串口/蓝牙参数在「连接设置」中配置；连接后标题栏显示当前串口与波特率。",
         foreground="gray",
     ).pack(fill=tk.X, padx=8, pady=(0, 6))
+
+    def on_close() -> None:
+        mux.close()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()

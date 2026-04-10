@@ -5,10 +5,12 @@
  * See doc/命令.md
  */
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "esp_app_desc.h"
 #include "esp_console.h"
@@ -30,11 +32,54 @@ static const char *TAG = "serial_cli";
 
 #define UART_CLI_NUM ((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM)
 
+#ifndef CONFIG_HTTPD_MAX_URI_LEN
+#define PCAPI_PATH_MAX 512
+#else
+#define PCAPI_PATH_MAX CONFIG_HTTPD_MAX_URI_LEN
+#endif
+
+#define PCAPI_LINE_MAX 640
+#define PCAPI_POST_MAX (512 * 1024)
+#define PCAPI_BODY_READ_MS 120000
+
 static int cmd_help(int argc, char **argv);
 static int cmd_ping(int argc, char **argv);
 static int cmd_mode_get(int argc, char **argv);
 static int cmd_mode_set(int argc, char **argv);
 static int cmd_version(int argc, char **argv);
+
+/** Find "PCAPI …" in line (e.g. after ESP log prefix); not inside identifier like "fooPCAPI". */
+static const char *find_pcapi_rest(const char *s)
+{
+    for (const char *p = s; *p != '\0'; p++) {
+        if (strncasecmp(p, "PCAPI", 5) != 0) {
+            continue;
+        }
+        if (p != s) {
+            unsigned char prev = (unsigned char)p[-1];
+            if (isalnum(prev) || prev == '_') {
+                continue;
+            }
+        }
+        p += 5;
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        return p;
+    }
+    return NULL;
+}
+
+static void pcapi_path_rtrim(char *path)
+{
+    if (!path) {
+        return;
+    }
+    size_t n = strlen(path);
+    while (n > 0 && (unsigned char)path[n - 1] <= 0x20u) {
+        path[--n] = '\0';
+    }
+}
 
 static const esp_console_cmd_t s_cmds[] = {
     {.command = "help", .help = "List commands", .hint = NULL, .func = cmd_help, .argtable = NULL},
@@ -50,6 +95,218 @@ static void cli_write_raw(const char *s, size_t len)
         return;
     }
     (void)uart_write_bytes(UART_CLI_NUM, s, len);
+}
+
+static void pcapi_send_hdr(int http_status, size_t body_len)
+{
+    /* New line before PCAPI_OUT so it is never glued to a previous incomplete log line. */
+    cli_write_raw("\r\n", 2);
+    char h[80];
+    int n = snprintf(h, sizeof(h), "PCAPI_OUT %d %u\r\n", http_status, (unsigned)body_len);
+    if (n > 0) {
+        cli_write_raw(h, (size_t)n);
+    }
+}
+
+static void pcapi_reply_err(int http_status, const char *json_msg)
+{
+    size_t sl = json_msg ? strlen(json_msg) : 0;
+    pcapi_send_hdr(http_status, sl);
+    if (sl) {
+        cli_write_raw(json_msg, sl);
+    }
+}
+
+static bool pcapi_parse_post_spec(const char *rest, char *path, size_t path_sz, size_t *body_len)
+{
+    const char *end = rest + strlen(rest);
+    while (end > rest && (end[-1] == ' ' || end[-1] == '\t')) {
+        end--;
+    }
+    const char *last_sp = NULL;
+    for (const char *q = rest; q < end; q++) {
+        if (*q == ' ') {
+            last_sp = q;
+        }
+    }
+    if (!last_sp || last_sp <= rest) {
+        return false;
+    }
+    for (const char *q = last_sp + 1; q < end; q++) {
+        if (*q < '0' || *q > '9') {
+            return false;
+        }
+    }
+    size_t plen = (size_t)(last_sp - rest);
+    if (plen == 0 || plen >= path_sz) {
+        return false;
+    }
+    memcpy(path, rest, plen);
+    path[plen] = '\0';
+    unsigned long n = strtoul(last_sp + 1, NULL, 10);
+    if (n > (unsigned long)PCAPI_POST_MAX) {
+        return false;
+    }
+    *body_len = (size_t)n;
+    return true;
+}
+
+static esp_err_t read_uart_exact(uint8_t *dst, size_t len, int timeout_ms)
+{
+    if (timeout_ms < 1000) {
+        timeout_ms = 1000;
+    }
+    size_t got = 0;
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+
+    while (got < len) {
+        if (xTaskGetTickCount() > deadline) {
+            return ESP_ERR_TIMEOUT;
+        }
+        int r = uart_read_bytes(UART_CLI_NUM, dst + got, (int)(len - got), pdMS_TO_TICKS(50));
+        if (r > 0) {
+            got += (size_t)r;
+        }
+    }
+    return ESP_OK;
+}
+
+/** Emit loopback JSON after HTTP; frees resp. */
+static void pcapi_write_loopback_payload(int st, char *resp, size_t rlen)
+{
+    if (rlen > 0 && resp) {
+        char hdr[80];
+        int hl = snprintf(hdr, sizeof(hdr), "PCAPI_OUT %d %u\r\n", st, (unsigned)rlen);
+        if (hl > 0) {
+            size_t blob = 2U + (size_t)hl + rlen;
+            char *one = (char *)malloc(blob);
+            if (one) {
+                memcpy(one, "\r\n", 2);
+                memcpy(one + 2, hdr, (size_t)hl);
+                memcpy(one + 2 + (size_t)hl, resp, rlen);
+                cli_write_raw(one, blob);
+                free(one);
+            } else {
+                pcapi_send_hdr(st, rlen);
+                cli_write_raw(resp, rlen);
+            }
+        }
+    } else {
+        pcapi_send_hdr(st, 0);
+    }
+    free(resp);
+}
+
+/**
+ * RX 偶尔丢失行首字节时可能只剩 "GET /api/..."。与完整 PCAPI 行等效（仅 GET）。
+ */
+static void handle_pcapi_bare_get(const char *path_start)
+{
+    char path[PCAPI_PATH_MAX + 8];
+    size_t i = 0;
+    while (path_start[i] && path_start[i] != ' ' && path_start[i] != '\t' && path_start[i] != '\r' && i < sizeof(path) - 1) {
+        path[i] = path_start[i];
+        i++;
+    }
+    path[i] = '\0';
+    while (i > 0 && (path[i - 1] == ' ' || path[i - 1] == '\t')) {
+        path[--i] = '\0';
+    }
+    if (path[0] != '/') {
+        pcapi_reply_err(400, "{\"status\":\"error\",\"message\":\"path must start with /\"}");
+        return;
+    }
+    int st = 503;
+    char *resp = NULL;
+    size_t rlen = 0;
+    esp_err_t e = web_pc_loopback_http("GET", path, NULL, NULL, 0, &st, &resp, &rlen);
+    if (e != ESP_OK) {
+        char ebuf[160];
+        snprintf(ebuf, sizeof(ebuf), "{\"status\":\"error\",\"message\":\"%s\"}", esp_err_to_name(e));
+        pcapi_reply_err(503, ebuf);
+        return;
+    }
+    pcapi_write_loopback_payload(st, resp, rlen);
+}
+
+/** p 指向 "GET|POST|DELETE ..."（已去掉 "PCAPI" 前缀） */
+static void handle_pcapi_from(const char *p)
+{
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+
+    char path[PCAPI_PATH_MAX + 8];
+    const char *method = NULL;
+    char *body = NULL;
+    size_t body_len = 0;
+
+    if (strncasecmp(p, "GET ", 4) == 0) {
+        method = "GET";
+        const char *ps = p + 4;
+        while (*ps == ' ' || *ps == '\t') {
+            ps++;
+        }
+        strlcpy(path, ps, sizeof(path));
+    } else if (strncasecmp(p, "DELETE ", 7) == 0) {
+        method = "DELETE";
+        const char *ps = p + 7;
+        while (*ps == ' ' || *ps == '\t') {
+            ps++;
+        }
+        strlcpy(path, ps, sizeof(path));
+    } else if (strncasecmp(p, "POST ", 5) == 0) {
+        method = "POST";
+        const char *rest = p + 5;
+        while (*rest == ' ' || *rest == '\t') {
+            rest++;
+        }
+        if (!pcapi_parse_post_spec(rest, path, sizeof(path), &body_len)) {
+            pcapi_reply_err(400, "{\"status\":\"error\",\"message\":\"bad PCAPI POST line\"}");
+            return;
+        }
+        if (body_len > 0) {
+            /* +1 for '\0': esp_http_client may use strlen(post_data) for Content-Length; without
+             * terminator the declared length can be wrong and the last byte of JSON is dropped. */
+            body = (char *)malloc(body_len + 1u);
+            if (!body) {
+                pcapi_reply_err(500, "{\"status\":\"error\",\"message\":\"oom\"}");
+                return;
+            }
+            if (read_uart_exact((uint8_t *)body, body_len, PCAPI_BODY_READ_MS) != ESP_OK) {
+                free(body);
+                pcapi_reply_err(408, "{\"status\":\"error\",\"message\":\"post body read timeout\"}");
+                return;
+            }
+            body[body_len] = '\0';
+        }
+    } else {
+        pcapi_reply_err(400, "{\"status\":\"error\",\"message\":\"use PCAPI GET|POST|DELETE\"}");
+        return;
+    }
+
+    pcapi_path_rtrim(path);
+
+    if (path[0] != '/') {
+        free(body);
+        pcapi_reply_err(400, "{\"status\":\"error\",\"message\":\"path must start with /\"}");
+        return;
+    }
+
+    int st = 503;
+    char *resp = NULL;
+    size_t rlen = 0;
+    esp_err_t e = web_pc_loopback_http(method, path, NULL, body, body_len, &st, &resp, &rlen);
+    free(body);
+    body = NULL;
+
+    if (e != ESP_OK) {
+        char ebuf[160];
+        snprintf(ebuf, sizeof(ebuf), "{\"status\":\"error\",\"message\":\"%s\"}", esp_err_to_name(e));
+        pcapi_reply_err(503, ebuf);
+        return;
+    }
+    pcapi_write_loopback_payload(st, resp, rlen);
 }
 
 static void cli_write(const char *s)
@@ -147,7 +404,8 @@ static esp_err_t uart_cli_ensure_driver(void)
         .source_clk = UART_SCLK_DEFAULT,
     };
 
-    esp_err_t e = uart_driver_install(UART_CLI_NUM, 4096, 2048, 0, NULL, 0);
+    /* RX 加大：WiFi 扫描时日志多，避免冲掉下一行 PCAPI 命令头 */
+    esp_err_t e = uart_driver_install(UART_CLI_NUM, 16384, 4096, 0, NULL, 0);
     if (e == ESP_ERR_INVALID_STATE) {
         return uart_is_driver_installed(UART_CLI_NUM) ? ESP_OK : e;
     }
@@ -180,8 +438,8 @@ static void uart_cli_task(void *arg)
         return;
     }
 
-    char line[256];
-    cli_write("\r\n4g_nic uart cli — type 'help'\r\n4g_nic> ");
+    char line[PCAPI_LINE_MAX];
+    cli_write("\r\n4g_nic uart cli — type 'help' or PCAPI lines for PC admin\r\n4g_nic> ");
 
     for (;;) {
         int nread = 0;
@@ -210,14 +468,40 @@ static void uart_cli_task(void *arg)
         }
 
         if (nread > 0) {
-            int ret = 0;
-            esp_err_t er = esp_console_run(line, &ret);
-            if (er == ESP_ERR_NOT_FOUND) {
-                cli_write("ERR unknown command (try help)\r\n");
-            } else if (er != ESP_OK) {
-                cli_printf("ERR run %s\r\n", esp_err_to_name(er));
+            char *s = line;
+            while (*s == ' ' || *s == '\t' || *s == '\r') {
+                s++;
             }
-            (void)ret;
+            const char *rest = find_pcapi_rest(s);
+            if (rest) {
+                handle_pcapi_from(rest);
+            } else if (strncasecmp(s, "GET ", 4) == 0) {
+                const char *ps = s + 4;
+                while (*ps == ' ' || *ps == '\t') {
+                    ps++;
+                }
+                if (*ps == '/') {
+                    handle_pcapi_bare_get(ps);
+                } else {
+                    int ret = 0;
+                    esp_err_t er = esp_console_run(s, &ret);
+                    if (er == ESP_ERR_NOT_FOUND) {
+                        cli_write("ERR unknown command (try help)\r\n");
+                    } else if (er != ESP_OK) {
+                        cli_printf("ERR run %s\r\n", esp_err_to_name(er));
+                    }
+                    (void)ret;
+                }
+            } else {
+                int ret = 0;
+                esp_err_t er = esp_console_run(s, &ret);
+                if (er == ESP_ERR_NOT_FOUND) {
+                    cli_write("ERR unknown command (try help)\r\n");
+                } else if (er != ESP_OK) {
+                    cli_printf("ERR run %s\r\n", esp_err_to_name(er));
+                }
+                (void)ret;
+            }
         }
         cli_write("4g_nic> ");
     }
@@ -241,7 +525,7 @@ void serial_cli_start(void)
         }
     }
 
-    if (xTaskCreate(uart_cli_task, "uart_cli", 6144, NULL, 4, NULL) != pdPASS) {
+    if (xTaskCreate(uart_cli_task, "uart_cli", 12288, NULL, 4, NULL) != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreate uart_cli failed");
         return;
     }
