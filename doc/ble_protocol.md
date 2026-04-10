@@ -38,3 +38,5 @@ This revision does **not** add application-level authentication. Anyone in radio
 ## Wi-Fi / BLE coexistence
 
 BLE and Wi-Fi run together on ESP32-S3; keep firmware logs in mind if diagnosing coexistence issues. If flash/RAM is tight, trim unused Bluedroid features in `menuconfig`.
+
+See also **[命令.md](命令.md)** (Chinese) for UART CLI vs BLE command mapping.

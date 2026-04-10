@@ -9,7 +9,6 @@
 #include "esp_netif.h"
 #include "esp_event.h"
 
-#include "ble_settings.h"
 #include "web_service.h"
 #include "system_hw_presence.h"
 #include "system_mode_manager.h"
@@ -52,5 +51,4 @@ void app_main(void)
     system_sta_baidu_probe_init();
     system_eth_uplink_debug_init();
     ESP_ERROR_CHECK(web_service_start());
-    (void)ble_settings_start();
 }

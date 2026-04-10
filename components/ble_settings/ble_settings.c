@@ -59,12 +59,13 @@ static char s_notify_buf[512];
 
 static uint8_t s_adv_svc_uuid_le[] = {0x50, 0xff};
 
+/** Primary advertising data: flags + 16-bit UUID only (fits 31-byte legacy AD). */
 static esp_ble_adv_data_t s_adv_data = {
     .set_scan_rsp = false,
-    .include_name = true,
+    .include_name = false,
     .include_txpower = false,
-    .min_interval = 0x0006,
-    .max_interval = 0x0010,
+    .min_interval = 0xFFFF,
+    .max_interval = 0xFFFF,
     .appearance = 0,
     .manufacturer_len = 0,
     .p_manufacturer_data = NULL,
@@ -73,6 +74,23 @@ static esp_ble_adv_data_t s_adv_data = {
     .service_uuid_len = sizeof(s_adv_svc_uuid_le),
     .p_service_uuid = s_adv_svc_uuid_le,
     .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
+};
+
+/** Scan response: device name only (separate 31-byte budget). */
+static esp_ble_adv_data_t s_scan_rsp_data = {
+    .set_scan_rsp = true,
+    .include_name = true,
+    .include_txpower = false,
+    .min_interval = 0xFFFF,
+    .max_interval = 0xFFFF,
+    .appearance = 0,
+    .manufacturer_len = 0,
+    .p_manufacturer_data = NULL,
+    .service_data_len = 0,
+    .p_service_data = NULL,
+    .service_uuid_len = 0,
+    .p_service_uuid = NULL,
+    .flag = 0,
 };
 
 static void ble_notify_json(const char *json)
@@ -165,6 +183,13 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
 {
     switch (event) {
     case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
+        /* Load scan response (name) then start advertising on SCAN_RSP complete. */
+        if (esp_ble_gap_config_adv_data(&s_scan_rsp_data) != ESP_OK) {
+            ESP_LOGE(TAG, "config_scan_rsp failed");
+            esp_ble_gap_start_advertising(&s_adv_params);
+        }
+        break;
+    case ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT:
         esp_ble_gap_start_advertising(&s_adv_params);
         break;
     case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
@@ -244,8 +269,9 @@ static void gatts_event_handler(esp_gatts_cb_event_t e, esp_gatt_if_t gatts_if, 
             break;
         }
         s_prof.tx_cccd_handle = param->add_char_descr.attr_handle;
-        if (esp_ble_gap_config_adv_data(&s_adv_data) != ESP_OK) {
-            ESP_LOGE(TAG, "config_adv_data failed");
+        esp_err_t ar = esp_ble_gap_config_adv_data(&s_adv_data);
+        if (ar != ESP_OK) {
+            ESP_LOGE(TAG, "config_adv_data failed: %s", esp_err_to_name(ar));
         }
         break;
 

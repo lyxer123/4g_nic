@@ -30,18 +30,30 @@ if errorlevel 1 (
     echo esptool is available
 )
 
-REM Flash offsets MUST match project root partitions_4mb.csv (www partition only).
-REM   www: offset 0x360000, size 0x10000 (64KB) — 4MB flash layout
-set "OFFSET=0x360000"
-set "WWW_SIZE=65536"
-REM Port: use ESPPORT env if set, else default COM5
+REM ===== Flash addresses MUST match the active partition table in the repo =====
+REM Current sdkconfig / sdkconfig.defaults: CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=partitions_4mb.csv
+REM Excerpt (repo root partitions_4mb.csv, 4MB flash):
+REM   ota_1 ends at 0x1C0000 + 0x1A0000 = 0x360000 — www starts immediately after
+REM   www   littlefs  0x360000  0x10000  (64 KiB)
+REM   lua   littlefs  0x370000  0x10000
+REM   key_data       0x380000  0x2000
+REM If you switch the project to partitions_large.csv (16MB), change the two vars below to:
+REM   set "WWW_FLASH_OFFSET=0xC76000"
+REM   set "WWW_SIZE_HEX=0x25800"
+REM   and set WWW_SIZE_DEC to decimal of 0x25800 for mklittlefs -s (153600)
+set "WWW_FLASH_OFFSET=0x360000"
+set "WWW_SIZE_HEX=0x10000"
+set "WWW_SIZE_DEC=65536"
+REM Port: use ESPPORT env if set, else default
 if not defined ESPPORT set "ESPPORT=COM8"
 echo.
 echo ========================================
-echo Using www partition offset: !OFFSET! size 0x10000 (64KB) - see partitions_4mb.csv
+echo Partition: www  offset !WWW_FLASH_OFFSET!  size !WWW_SIZE_HEX! (!WWW_SIZE_DEC! bytes)
+echo Source table: ..\..\partitions_4mb.csv ^(verify sdkconfig if you use another CSV^)
 echo ========================================
 echo.
-echo Note: Offset must match partition table. After flash, verify in serial: "Found partition \"www\": offset=0x360000"
+echo Note: Image must be ^<= partition size; next partition ^(lua^) starts at 0x370000 on 4MB layout.
+echo After flash, serial log should show: Found partition "www": offset=0x360000
 echo.
 
 REM Source = repo webPage/ folder; output = this script's directory
@@ -64,9 +76,9 @@ if errorlevel 1 (
 )
 
 REM Execute mklittlefs command to create filesystem image from staging (gzipped files)
-echo Creating LittleFS image from %STAGING_DIR% (size %WWW_SIZE% = 0x10000 = 64KB)...
-echo executing: !MKFS_PATH! -c "%STAGING_DIR%" -p 256 -b 4096 -s %WWW_SIZE% -a "%OUTPUT_DIR%\www.bin"
-!MKFS_PATH! -c "%STAGING_DIR%" -p 256 -b 4096 -s %WWW_SIZE% -a "%OUTPUT_DIR%\www.bin"
+echo Creating LittleFS image from %STAGING_DIR% (partition size %WWW_SIZE_DEC% bytes = !WWW_SIZE_HEX!)...
+echo executing: !MKFS_PATH! -c "%STAGING_DIR%" -p 256 -b 4096 -s %WWW_SIZE_DEC% -a "%OUTPUT_DIR%\www.bin"
+!MKFS_PATH! -c "%STAGING_DIR%" -p 256 -b 4096 -s %WWW_SIZE_DEC% -a "%OUTPUT_DIR%\www.bin"
 
 if errorlevel 1 (
     echo Error: Failed to create LittleFS image
@@ -80,17 +92,24 @@ echo.
 echo Flashing image to device...
 echo.
 echo IMPORTANT: Verifying partition offset...
-echo   Expected www partition offset: !OFFSET!
-echo   If this doesn't match the compiled partition table, flashing will fail!
+echo   Expected www partition offset: !WWW_FLASH_OFFSET!
+echo   If this doesn't match the compiled partition table, flashing will land in the wrong place.
 echo.
 echo Checking image file size...
-for %%A in ("%OUTPUT_DIR%/www.bin") do (
+for %%A in ("%OUTPUT_DIR%\www.bin") do (
     set "IMAGE_SIZE=%%~zA"
     echo Image file size: !IMAGE_SIZE! bytes
 )
+if !IMAGE_SIZE! gtr %WWW_SIZE_DEC% (
+    echo.
+    echo ERROR: www.bin (!IMAGE_SIZE! bytes^) is larger than www partition (!WWW_SIZE_DEC! bytes^).
+    echo Reduce web assets or enlarge www in the partition table ^+ mklittlefs -s / flash offset.
+    pause
+    exit /b 1
+)
 echo.
-echo Executing: python -m esptool --port %ESPPORT% write_flash !OFFSET! "%OUTPUT_DIR%\www.bin"
-python -m esptool --port %ESPPORT% write_flash !OFFSET! "%OUTPUT_DIR%\www.bin"
+echo Executing: python -m esptool --port %ESPPORT% write_flash !WWW_FLASH_OFFSET! "%OUTPUT_DIR%\www.bin"
+python -m esptool --port %ESPPORT% write_flash !WWW_FLASH_OFFSET! "%OUTPUT_DIR%\www.bin"
 
 if errorlevel 1 (
     echo.
@@ -98,9 +117,9 @@ if errorlevel 1 (
     echo Please check:
     echo   1. Is ESP32 device connected on %ESPPORT%?
     echo   2. Is device in flash mode (hold BOOT button while pressing RESET)?
-    echo   3. Is partition offset address correct? Expected: !OFFSET!
-    echo   4. Did you rebuild the project after changing partition table?
-    echo   5. Check build\partition_table\partition-table.csv or partitions_4mb.csv for actual offset
+    echo   3. Is partition offset correct? Expected www @ !WWW_FLASH_OFFSET! — see partitions_4mb.csv
+    echo   4. Did you rebuild / full-flash after changing partition table?
+    echo   5. build\partition_table\partition-table.bin is generated from root partitions_4mb.csv
     pause
     exit /b 1
 ) else (
@@ -110,18 +129,18 @@ if errorlevel 1 (
     echo ========================================
     echo.
     echo Flash details:
-    echo   Offset used: !OFFSET!
-    echo   Image file: %OUTPUT_DIR%/www.bin
+    echo   Offset used: !WWW_FLASH_OFFSET!
+    echo   Image file: %OUTPUT_DIR%\www.bin
     echo.
     echo Next steps:
     echo   1. Restart the ESP32 device
     echo   2. Check serial monitor for filesystem initialization logs
     echo   3. Look for: "Found partition \"www\": offset=0x..."
-    echo   4. VERIFY the offset matches: !OFFSET!
+    echo   4. VERIFY the offset matches: !WWW_FLASH_OFFSET!
     echo   5. If offset mismatch, files were flashed to wrong location!
     echo.
     echo Expected log output:
-    echo   I ... fs_manager: Found partition "www": offset=0x... (should match !OFFSET!)
+    echo   I ... fs_manager: Found partition "www": offset=0x360000 (4MB layout)
     echo   I ... fs_manager: Found required file: /www/index.html
     echo   I ... fs_manager: Found required file: /www/js/app.js
     echo   I ... fs_manager: Found required file: /www/css/style.css
@@ -130,5 +149,5 @@ if errorlevel 1 (
 
 echo.
 echo Frontend deployment completed!
-echo Note: Web files will be available at http://<device_ip>/ after reboot
+echo Note: Web files will be available at http://^<device_ip^>/ after reboot
 pause

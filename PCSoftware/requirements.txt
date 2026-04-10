@@ -1,0 +1,4 @@
+# Windows 11 BLE (WinRT); requires 64-bit Python 3.10+.
+bleak>=0.21.0
+# COM / UART (optional for BLE-only use; GUI serial tab needs this).
+pyserial>=3.5
