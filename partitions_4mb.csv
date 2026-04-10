@@ -1,13 +1,13 @@
 # Name,   Type, SubType, Offset,  Size, Flags
 # 4MB flash. Partition table @ 0x10000; bootloader 0x0..0x10000.
-# factory/ota_0/ota_1: 0x120000 each (~1152 KiB). No font/storage.
-# Compact nvs/otadata/phy; ~0x30000 free at end of flash for margin.
+# No factory: dual OTA only (ota_0 / ota_1). Each app slot 0x1A0000 (~1664 KiB) >= current ~0x196480 image.
+# www/lua shrunk vs old layout; reflash www/lua images or run full flash after partition change.
+# After changing partitions: full flash or erase otadata so bootloader picks a valid slot.
 nvs,        data, nvs,      0x11000, 0x9000,
 otadata,    data, ota,      0x1A000, 0x2000,
 phy_init,   data, phy,      0x1C000, 0x1000,
-factory,    app,  factory,  0x20000, 0x130000,
-ota_0,      app,  ota_0,    0x150000, 0x130000,
-ota_1,      app,  ota_1,    0x280000, 0x130000,
-www,        data, littlefs, 0x3B0000, 0x18000,
-lua,        data, littlefs, 0x3C8000, 0x18000,
-key_data,   data, 0x40,     0x3E0000, 0x2000,
+ota_0,      app,  ota_0,    0x20000, 0x1A0000,
+ota_1,      app,  ota_1,    0x1C0000, 0x1A0000,
+www,        data, littlefs, 0x360000, 0x10000,
+lua,        data, littlefs, 0x370000, 0x10000,
+key_data,   data, 0x40,     0x380000, 0x2000,

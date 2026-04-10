@@ -1333,6 +1333,38 @@ static const char *working_mode_tag_from_id(uint8_t id)
     return "4g";
 }
 
+esp_err_t web_service_get_work_mode_u8(uint8_t *out)
+{
+    if (!out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return load_work_mode_u8(out);
+}
+
+esp_err_t web_service_apply_work_mode_id(uint8_t m)
+{
+    if (!system_mode_manager_get_profile(m) || !system_mode_manager_mode_allowed(m)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t mer = save_work_mode_u8(m);
+    if (mer != ESP_OK) {
+        return mer;
+    }
+    schedule_deferred_mode_apply(m);
+    nvs_handle_t hh = 0;
+    if (nvs_open(NVS_NS_WEBUI, NVS_READWRITE, &hh) == ESP_OK) {
+        const char *tag = working_mode_tag_from_id(m);
+        nvs_set_str(hh, NVS_KEY_UIWM, tag);
+        const system_mode_profile_t *pm = system_mode_manager_get_profile(m);
+        if (pm) {
+            nvs_set_u8(hh, NVS_KEY_WANTYPE, (uint8_t)pm->wan_type);
+        }
+        nvs_commit(hh);
+        nvs_close(hh);
+    }
+    return ESP_OK;
+}
+
 static void fmt_mac(char *out, size_t outsz, const uint8_t *m)
 {
     snprintf(out, outsz, "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);

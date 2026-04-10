@@ -15,6 +15,15 @@ bool web_service_is_running(void);
 /** After bridge Wi‑Fi init: restore SoftAP SSID/password from NVS (driver uses WIFI_STORAGE_RAM). */
 void web_softap_restore_from_nvs(void);
 
+/** Read persisted work mode id from NVS (`bridge_ui` / `work_mode`). */
+esp_err_t web_service_get_work_mode_u8(uint8_t *out);
+
+/**
+ * Validate mode, persist NVS, schedule deferred `system_mode_manager_apply`, update web_ui keys.
+ * Same effect as setting `work_mode_id` in POST `/api/network/config`.
+ */
+esp_err_t web_service_apply_work_mode_id(uint8_t mode_id);
+
 #ifdef __cplusplus
 }
 #endif
