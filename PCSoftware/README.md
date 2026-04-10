@@ -1,40 +1,38 @@
-# PCSoftware — Windows 11 BLE / 串口 配置工具
+# PCSoftware — 4G NIC 串口管理工具（Windows）
 
-与根目录 [`app/`](../app/) 类似：在本机用 **低功耗蓝牙（BLE）** 或 **串口（COM）** 连接设备（**同一时间只能使用一种方式**：连接 BLE 时会断开串口，连接串口前若已连 BLE 会先断开 BLE）。
+本目录提供在 **Windows** 上通过 **USB 串口（COM）** 管理设备的桌面程序。管理请求经固件 **PCAPI** 转发到设备内 **HTTP 服务（127.0.0.1 回环）**，与浏览器访问的 **同一套 REST JSON 接口**，无需设备出网也能完成绝大多数配置。
 
-- **BLE**：连接 **4G_NIC_CFG** 从机，通过 [`doc/ble_protocol.md`](../doc/ble_protocol.md) 的 GATT/JSON 协议读写 **work_mode** 等（`ping` / `get_mode` / `set_mode` / `version`）。左侧 **自定义 JSON** 仅在此模式下可用。
-- **串口**：`115200` 等波特率（与工程 `CONFIG_ESP_CONSOLE_*` 一致），收发与 [`doc/命令.md`](../doc/命令.md) 中 UART CLI 一致（`help` / `ping` / `mode_get` / `mode_set` / `version`）。
+- **入口**：仓库根目录下进入 `PCSoftware`，执行 `python main.py`（见下文环境）。
+- **蓝牙**：界面「连接设置」中蓝牙区域暂为占位（后续版本）；当前请以 **串口** 为准。
+- **与 Flutter**：根目录 [`app/`](../app/) 为手机端 BLE 配网示例；本工具侧重 **串口 + Web  parity**，协议说明仍可参考 [`doc/ble_protocol.md`](../doc/ble_protocol.md) / [`doc/ble_protocolcn.md`](../doc/ble_protocolcn.md)。
 
-界面 **右侧** 为深色日志区：按 ESP-IDF 风格对 `I`/`W`/`E`、`ok`/`ERR` 等行着色，自动滚动，超过约 **800 行** 会丢弃最旧行。**左侧** 为扫描/连接、串口选择与 **`doc/命令.md`** 对应的快捷按钮，减少手敲命令。
+---
 
-## 环境（Win11）
+## 功能一览
 
-1. 安装 **64 位 Python 3.10+**（[python.org](https://www.python.org/downloads/) 或 `winget install Python.Python.3.12`）。
-2. 打开 **设置 → 蓝牙和其他设备 → 蓝牙**，确保蓝牙已开启。
-3. 若在虚拟机中，需能直通主机蓝牙；否则 BLE 可能不可用。
-
-## 为什么在「设置 → 蓝牙」里看不到设备？
-
-Win11 里那份列表主要是 **经典蓝牙配对**。本项目的 ESP32-S3 一般是 **BLE（低功耗蓝牙）从机**，很多情况下 **不会出现在系统设置的可添加设备列表**里，这是正常现象。请用下面 **BLE 扫描工具** 或本目录的 **`python main.py`** 扫描；目标广播名 **`4G_NIC_CFG`**（亦可能显示为带 `4G_NIC` 的名称）。
-
-若固件曾出现 `config_adv_data failed`，需先烧录 **已修复广播数据** 的版本（见 `components/ble_settings/ble_settings.c` 里 `min_interval`/`max_interval` 为 `0xFFFF`），否则设备可能根本不对外广播。
-
-## 可安装的 BLE 工具（Windows 11）
-
-| 工具 | 说明 |
+| 模块 | 说明 |
 |------|------|
-| **本仓库 PCSoftware** | `pip install -r requirements.txt` 后 `python main.py`，点「扫描」即可（依赖本机蓝牙）。 |
-| **[Bluetooth LE Explorer](https://apps.microsoft.com/detail/9n0z26ndvkz9)** | 微软商店免费应用，可扫描、连接、看 GATT 与读写特征。 |
-| **[nRF Connect for Desktop](https://www.nordicsemi.com/Products/Development-tools/nRF-Connect-for-desktop/Download#infotabs)** | Nordic 官方，带 **Scanner**，适合开发调试（不必有 Nordic 芯片）。 |
-| **手机 nRF Connect**（Android / iOS） | 应用商店搜 **nRF Connect**，扫一下可确认设备是否在广播（排除仅 PC 蓝牙问题）。安卓还可装 **BLE Scanner** 等作备选。 |
+| **连接设置** | 选择 COM 口、波特率（默认 `115200`，与工程 `CONFIG_ESP_CONSOLE_*` 一致），连接 / 断开串口；可刷新端口列表。 |
+| **状态** | **总览**：系统模式、版本、时间、内存、运行时间、在线用户、4G/接口摘要等（`GET /api/dashboard/overview`）。**用户列表**：在线 STA（`GET /api/users/online`）。 |
+| **网络配置** | **工作模式**：WAN 类型与 LAN 组合、与网页一致的模式表（`GET/POST /api/mode`、`/api/network/config`）。**无线**：STA 扫描 / 保存 / 读取 / 清空，SoftAP SSID/加密/密码（`/api/wifi/*`、`/api/wifi/ap`）。**有线**：以太网上行参数（`/api/eth_wan`）。刷新、保存等与设备 API 一一对应。 |
+| **APN 设置** | 蜂窝 APN 读写（`/api/network/apn`）。 |
+| **系统管理** | 管理密码、系统时间/时区、升级与恢复出厂、系统日志、网络探测地址、重启与定时重启计划等（各 `/api/system/*`）。 |
+| **串口信息** | 右侧深色日志：设备打印的 `I/W/E` 行、CLI 提示符、**PCAPI** 请求/响应摘要等；带简单着色、自动滚屏，约 **900** 行后丢弃最旧内容。 |
+| **布局** | 中部 **可拖拽分隔条** 调整左侧表单与右侧日志宽度；窗口标题在串口连接成功后显示 **端口与波特率**。 |
+| **菜单逻辑** | 仅当 **串口连接成功** 时，**状态 / 网络配置 / 系统管理** 三个顶层菜单可用；断开串口后上述菜单 **灰显**，避免误操作（**连接设置** 始终可用）。 |
 
-笔记本请确认 **飞行模式关闭**、蓝牙驱动无黄色感叹号；部分台式机用的是 **仅 2.4G 无线键鼠接收器**（伪装成 USB 小辫子），**没有 BLE**，需在主板或外接 **带 BLE 的 USB 蓝牙适配器**。
+---
 
-## 虚拟环境与依赖
+## 使用说明
 
-在 **`PCSoftware`** 目录下创建虚拟环境并安装依赖。
+### 1. 安装依赖
 
-**PowerShell**（注意前面的 `.\`，且脚本名为 `Activate.ps1`，不要只写 `activate`，否则会被当成模块名报错）：
+需 **64 位 Python 3.10+**（推荐 3.11/3.12）。
+
+在 **`PCSoftware`** 目录下：
+
+**PowerShell**（注意 `Activate.ps1` 路径；若禁止脚本，可先执行  
+`Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`）：
 
 ```powershell
 python -m venv .venv
@@ -43,13 +41,7 @@ pip install -U pip
 pip install -r requirements.txt
 ```
 
-若提示「无法加载，因为在此系统上禁止运行脚本」，先对当前用户放行（一次性）：
-
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
-
-**CMD** 可用：
+**CMD**：
 
 ```bat
 python -m venv .venv
@@ -58,55 +50,116 @@ pip install -U pip
 pip install -r requirements.txt
 ```
 
-**不激活也可以**：直接用 `.venv\Scripts\pip.exe`、`.venv\Scripts\python.exe`。
+不激活虚拟环境时，可直接使用 `.venv\Scripts\python.exe`、`.venv\Scripts\pip.exe`。
 
-## 在 Cursor 中开发
+### 2. 启动程序
 
-1. 安装扩展：**Python**（Microsoft）。
-2. `Ctrl+Shift+P` → **Python: Select Interpreter** → 选择 `PCSoftware\.venv\Scripts\python.exe`。
-3. 终端已激活 `.venv` 时运行：`python main.py`。
+```powershell
+cd PCSoftware
+.\.venv\Scripts\python.exe main.py
+```
 
-## 运行
+### 3. 操作顺序（建议）
 
-PowerShell：
+1. 菜单 **「连接设置…」**：选择 **串口**、**波特率** → **连接串口**。成功后标题栏会显示当前 COM。
+2. **状态 / 网络配置 / 系统管理** 菜单变为可用；默认会打开 **总览** 页，可按需切换子菜单项。
+3. 在各页面点击 **读取 / 刷新 / 保存** 等按钮；结果与报错会出现在设备日志及（部分）消息框中，PCAPI 往返可在 **串口信息** 里查看。
+4. 需要更多日志宽度时，**向左拖动** 中间分隔条，放大右侧文本区域。
+5. 断开时仍在 **连接设置** 中点 **断开串口**；勿与 **`idf.py monitor`** 等同时占用同一 COM 口。
+
+### 4. 注意事项
+
+- 串口上与固件 **UART CLI** 共线，详细命令见仓库 [`doc/命令.md`](../doc/命令.md)；固件实现见 `components/serial_cli/`。
+- 若 PCAPI 请求失败，请结合 **串口信息** 中的 `HTTP` 状态与 JSON `message` 排查（例如未连串口、超时、设备返回 4xx/5xx）。
+- **不要** 在本工具已打开 COM 的同时，再用其他软件打开同一端口。
+
+---
+
+## 环境与可选组件
+
+- **pyserial**：串口列表与读写（`requirements.txt` 已包含）。
+- **bleak**：依赖文件中保留，供后续 BLE 功能或其它脚本使用；当前主界面 **不依赖** BLE 扫描。
+- **tkinter**：Python 标准库，一般 **无需单独安装**。
+- **打包 exe**：见下节「打包为 Windows exe」。
+
+---
+
+## 打包为 Windows exe（PyInstaller）
+
+使用仓库内 **`4g_nic_pc.spec`** 生成 **单文件** 可执行程序（无黑色控制台窗口，纯 GUI）。
+
+### 一键构建
+
+在 **`PCSoftware`** 目录下双击或运行：
+
+```bat
+build_windows.bat
+```
+
+若已创建虚拟环境，脚本会优先使用 `.venv\Scripts\python.exe`；否则使用系统 `python`。  
+成功后输出：**`dist\4G_NIC_Admin.exe`**（可拷贝到任意 Win10/11 64 位机器运行，无需安装 Python）。
+
+### 手动构建
 
 ```powershell
 cd PCSoftware
 .\.venv\Scripts\Activate.ps1
-python main.py
+pip install -r requirements.txt -r requirements-build.txt
+python -m PyInstaller --clean -y 4g_nic_pc.spec
 ```
 
-或不激活：
+### 说明与排错
 
-```powershell
-.\.venv\Scripts\python.exe main.py
-```
+- **体积**：单文件 exe 约十几 MB 属正常（含 Python 运行时与 tkinter）。
+- **杀毒软件**：部分环境可能误报 PyInstaller 打包产物，必要时加入信任或改用代码签名（需自有证书）。
+- **调试**：若启动无界面或异常，可暂时将 `4g_nic_pc.spec` 中 `console=False` 改为 `console=True` 重新打包，以看到报错输出。
+- **自定义**：应用名称在 `4g_nic_pc.spec` 的 `name=`；图标可设置 `icon='路径.ico'`（需自行准备 `.ico`）。
 
-1. **BLE**：点 **扫描**，选中设备后 **连接**；通知与日志出现在 **右侧**。
-2. **串口**：选 **COM**（可 **刷新** 列表）、波特率，点 **连接串口**；设备输出进入同一日志区。
-3. 使用左侧 **快捷命令**（随当前连接自动发 JSON 或 CLI 行），或仅在 BLE 已连时用 **自定义 JSON**。
+---
 
-## 协议与网页参数
+## 协议与文档
 
-- UUID、命令表与安全说明见 **`doc/ble_protocol.md`**（中文版：`doc/ble_protocolcn.md`）。
-- **串口侧子命令**（`4g_nic> ` 提示符、`mode_get` / `mode_set` 等）见 **`doc/命令.md`**；固件：`components/serial_cli/`（`esp_console` 注册命令 + `uart_read_bytes` / `esp_console_run`，**非** linenoise REPL，避免与日志重入）。
-- 网页上其余 POST 字段（LAN、WAN、SoftAP 等）需在固件侧扩展 JSON `cmd` 与串口子命令；本 BLE 工具只需发送对应 JSON，**无需改 PC 侧架构**。
+| 内容 | 路径 |
+|------|------|
+| UART 子命令与 REPL 说明 | [`doc/命令.md`](../doc/命令.md) |
+| BLE GATT / JSON（与移动端的约定） | [`doc/ble_protocol.md`](../doc/ble_protocol.md)、[`doc/ble_protocolcn.md`](../doc/ble_protocolcn.md) |
+| 设备 Web API 与网页 | 仓库 `webPage/`、`components/webService/` |
 
-## 串口与 BLE 同时调试
+PC 侧请求体与浏览器 **Web 管理页** 提交格式一致；具体路径以 `nic_ble_pc/admin_pages.py` 中常量（如 `P_NET`、`P_WIFI_STA`）为准。
 
-本程序已内置串口页；若仍用 **`idf.py monitor`** 占用了同一 UART，请只开其一，避免两路同时打开同一 COM 口。
+---
 
-## 技术说明
+## 为什么在系统「蓝牙」里可能看不到设备？
 
-- **bleak**：跨平台 BLE，在 Win11 上使用系统蓝牙栈。
-- **pyserial**：串口列表与读写（`pip install -r requirements.txt` 已包含）。
-- **tkinter**：Python 自带 GUI，无需额外安装 Qt。
-- 可选：稍后用 **PyInstaller** 打包为 `.exe`（`pip install pyinstaller`，再对 `main.py` 打包）；当前以源码运行为主。
+Win11 **设置 → 蓝牙** 中的列表以**经典蓝牙配对**为主。设备若以 **BLE 从机** 仅广播连应用使用，**不一定**出现在该列表，属常见情况。若需验证广播，可用 **nRF Connect**、**Bluetooth LE Explorer** 等（见旧版文档中的工具表），或等待后续在 PC 工具中接入 BLE。
 
-## 与 `app/` 的对应关系
+---
 
-| 项目 | `app/`（Flutter） | `PCSoftware/`（Python） |
-|------|-------------------|-------------------------|
-| BLE 库 | flutter_blue_plus | bleak |
+## 在 Cursor / VS Code 中开发
+
+1. 安装扩展：**Python**（Microsoft）。
+2. `Ctrl+Shift+P` → **Python: Select Interpreter** → 选 `PCSoftware\.venv\Scripts\python.exe`。
+3. 在终端激活 `.venv` 后运行：`python main.py`。
+
+---
+
+## 与 `app/` 的对应关系（简要）
+
+| 项目 | `app/`（Flutter） | `PCSoftware/`（本工具） |
+|------|------------------|-------------------------|
+| 主要连接 | BLE | 串口（PCAPI） |
+| API 形态 | 特征值 + JSON | HTTP 回环同款 REST |
 | UI | Flutter | tkinter |
-| 协议 | 同 `0xFF50` / `FF51` / `FF52` + JSON | 相同 |
+
+---
+
+## 常见问题
+
+**Q：菜单灰掉点不了？**  
+A：请先在 **连接设置** 里 **连接串口**。仅 **连接设置** 在未连接时也可用。
+
+**Q：与 `idf.py monitor` 冲突？**  
+A：同一 UART 只能被一个程序打开，请二选一。
+
+**Q：Python 找不到 `serial`？**  
+A：在 `PCSoftware` 下对当前解释器执行 `pip install -r requirements.txt`。
