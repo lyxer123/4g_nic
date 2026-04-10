@@ -71,6 +71,8 @@ static void log_ring_fmt(const char *fmt, ...)
  * hundred ms so the browser gets JSON and can show toast / reconnect.
  */
 #define WEB_DEFER_APPLY_MS 450
+/** SoftAP apply runs after work_mode deferred task so STA/mode changes do not race the AP config. */
+#define WEB_DEFER_SOFTAP_MS (WEB_DEFER_APPLY_MS * 2)
 
 typedef struct {
     uint8_t mode;
@@ -108,10 +110,12 @@ static void schedule_deferred_mode_apply(uint8_t mode)
 static void deferred_wifi_ap_set_task(void *arg)
 {
     wifi_config_t *cfg = (wifi_config_t *)arg;
-    vTaskDelay(pdMS_TO_TICKS(WEB_DEFER_APPLY_MS));
+    vTaskDelay(pdMS_TO_TICKS(WEB_DEFER_SOFTAP_MS));
     esp_err_t werr = esp_wifi_set_config(WIFI_IF_AP, cfg);
     if (werr != ESP_OK) {
-        ESP_LOGW(TAG, "deferred esp_wifi_set_config(AP): %s", esp_err_to_name(werr));
+        ESP_LOGE(TAG, "deferred esp_wifi_set_config(AP): %s", esp_err_to_name(werr));
+    } else {
+        ESP_LOGI(TAG, "SoftAP applied: ssid=%.32s auth=%u", cfg->ap.ssid, (unsigned)cfg->ap.authmode);
     }
     free(cfg);
     vTaskDelete(NULL);
@@ -161,6 +165,85 @@ static void schedule_deferred_wifi_ap_set(const wifi_config_t *wcfg)
 #define NVS_KEY_APN     "apn_str"
 #define NVS_KEY_APNUSER "apn_user"
 #define NVS_KEY_APNPWD  "apn_pwd"
+/* Persist SoftAP (WIFI_STORAGE_RAM in iot-bridge does not survive reboot). */
+#define NVS_KEY_APSSID "ap_ssid"
+#define NVS_KEY_APPWD  "ap_pwd"
+#define NVS_KEY_APAUTH "ap_auth"
+#define NVS_KEY_APHID  "ap_hid"
+#define NVS_KEY_APCHAN "ap_chan"
+
+static esp_err_t softap_cfg_save_to_nvs(const wifi_config_t *wcfg)
+{
+    nvs_handle_t nh = 0;
+    if (nvs_open(NVS_NS_WEBUI, NVS_READWRITE, &nh) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    esp_err_t e = nvs_set_str(nh, NVS_KEY_APSSID, (const char *)wcfg->ap.ssid);
+    if (e == ESP_OK) {
+        e = nvs_set_str(nh, NVS_KEY_APPWD, (const char *)wcfg->ap.password);
+    }
+    if (e == ESP_OK) {
+        e = nvs_set_u8(nh, NVS_KEY_APAUTH, (uint8_t)wcfg->ap.authmode);
+    }
+    if (e == ESP_OK) {
+        e = nvs_set_u8(nh, NVS_KEY_APHID, wcfg->ap.ssid_hidden ? 1u : 0u);
+    }
+    if (e == ESP_OK) {
+        e = nvs_set_u8(nh, NVS_KEY_APCHAN, wcfg->ap.channel);
+    }
+    if (e == ESP_OK) {
+        e = nvs_commit(nh);
+    }
+    nvs_close(nh);
+    return e;
+}
+
+void web_softap_restore_from_nvs(void)
+{
+    nvs_handle_t h = 0;
+    if (nvs_open(NVS_NS_WEBUI, NVS_READONLY, &h) != ESP_OK) {
+        return;
+    }
+    char ssid[33] = {0};
+    char pwd[65] = {0};
+    size_t n = sizeof(ssid);
+    if (nvs_get_str(h, NVS_KEY_APSSID, ssid, &n) != ESP_OK || ssid[0] == '\0') {
+        nvs_close(h);
+        return;
+    }
+    n = sizeof(pwd);
+    (void)nvs_get_str(h, NVS_KEY_APPWD, pwd, &n);
+    uint8_t auth_u8 = (uint8_t)WIFI_AUTH_WPA2_PSK;
+    (void)nvs_get_u8(h, NVS_KEY_APAUTH, &auth_u8);
+    uint8_t hid = 0;
+    (void)nvs_get_u8(h, NVS_KEY_APHID, &hid);
+    uint8_t ch = 0;
+    (void)nvs_get_u8(h, NVS_KEY_APCHAN, &ch);
+    nvs_close(h);
+
+    wifi_config_t wcfg;
+    memset(&wcfg, 0, sizeof(wcfg));
+    strlcpy((char *)wcfg.ap.ssid, ssid, sizeof(wcfg.ap.ssid));
+    strlcpy((char *)wcfg.ap.password, pwd, sizeof(wcfg.ap.password));
+    wcfg.ap.ssid_len = (uint8_t)strlen((char *)wcfg.ap.ssid);
+    wcfg.ap.channel = ch;
+    wcfg.ap.authmode = (wifi_auth_mode_t)auth_u8;
+    wcfg.ap.ssid_hidden = hid;
+    wcfg.ap.max_connection = 8;
+
+    if (wcfg.ap.authmode != WIFI_AUTH_OPEN) {
+        size_t plen = strlen((char *)wcfg.ap.password);
+        if (plen < 8 || plen > 63) {
+            ESP_LOGW(TAG, "SoftAP NVS: skip restore (PSK length %u)", (unsigned)plen);
+            return;
+        }
+    } else {
+        memset(wcfg.ap.password, 0, sizeof(wcfg.ap.password));
+    }
+
+    esp_err_t e = esp_wifi_set_config(WIFI_IF_AP, &wcfg);
+    ESP_LOGI(TAG, "SoftAP from NVS: %s ssid=%.32s auth=%u", esp_err_to_name(e), wcfg.ap.ssid, (unsigned)auth_u8);
+}
 
 static const char *tz_display_to_posix(const char *tz_display)
 {
@@ -1857,6 +1940,22 @@ static esp_err_t uri_wifi_ap_post(httpd_req_t *req)
         wcfg.ap.channel = (uint8_t)atoi(ch->valuestring);
     }
     wcfg.ap.max_connection = 8;
+
+    /* OPEN 必须无密码；WPA/WPA2/WPA3 需 8–63 字节，否则 esp_wifi_set_config 失败，热点仍为开放 */
+    if (wcfg.ap.authmode == WIFI_AUTH_OPEN) {
+        memset(wcfg.ap.password, 0, sizeof(wcfg.ap.password));
+    } else {
+        size_t plen = strlen((char *)wcfg.ap.password);
+        if (plen < 8 || plen > 63) {
+            cJSON_Delete(root);
+            return send_json(req, 400,
+                             "{\"status\":\"error\",\"message\":\"WPA 密码需 8–63 位。开启或改为加密时请重新输入密码并保存（页面为安全不显示已存密码）。\"}");
+        }
+    }
+
+    if (softap_cfg_save_to_nvs(&wcfg) != ESP_OK) {
+        ESP_LOGW(TAG, "SoftAP NVS save failed");
+    }
 
     cJSON *extra = cJSON_CreateObject();
     cJSON *p = cJSON_GetObjectItem(root, "protocol");

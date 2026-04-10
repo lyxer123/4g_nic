@@ -4,7 +4,7 @@
 
 ## 当前已实现
 
-- **Wi-Fi STA 设置**
+- **WiFi STA 设置**
   - 扫描附近 SSID：`GET /api/wifi/scan`
   - 保存/修改 STA：`POST /api/wifi`，JSON：`{ "ssid": "...", "password": "..." }`
   - 从设备读取：`GET /api/wifi`（可选；未实现时会回退到本地缓存）

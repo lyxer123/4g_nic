@@ -42,18 +42,18 @@ typedef struct {
 static const char *TAG = "mode_mgr";
 
 static const system_mode_profile_t s_profiles[] = {
-    {1, "4G -> Wi-Fi (SoftAP)", SYSTEM_WAN_USB_MODEM, true, false, false, false},
-    {2, "4G 上行 -> W5500 内网(LAN)", SYSTEM_WAN_USB_MODEM, false, true, false, false},
-    {3, "4G 上行 -> 热点 + W5500(LAN)", SYSTEM_WAN_USB_MODEM, true, true, false, false},
-    {4, "Wi‑Fi STA 上行 -> 热点(LAN)", SYSTEM_WAN_WIFI_STA, true, false, true, false},
-    {5, "Wi‑Fi STA 上行 -> W5500 内网(LAN)", SYSTEM_WAN_WIFI_STA, false, true, true, false},
-    {6, "Wi‑Fi STA 上行 -> 热点 + W5500(LAN)", SYSTEM_WAN_WIFI_STA, true, true, true, false},
-    {7, "W5500 外网(WAN) -> 热点(LAN)", SYSTEM_WAN_W5500, true, false, false, true},
+    {1, "4G上行->WiFi热点", SYSTEM_WAN_USB_MODEM, true, false, false, false},
+    {2, "4G上行->有线网络", SYSTEM_WAN_USB_MODEM, false, true, false, false},
+    {3, "4G上行->WiFi热点+有线网络", SYSTEM_WAN_USB_MODEM, true, true, false, false},
+    {4, "WiFi上行->WiFi热点", SYSTEM_WAN_WIFI_STA, true, false, true, false},
+    {5, "WiFi上行->有线网络", SYSTEM_WAN_WIFI_STA, false, true, true, false},
+    {6, "WiFi上行->WiFi热点+有线网络", SYSTEM_WAN_WIFI_STA, true, true, true, false},
+    {7, "有线网络上行->WiFi热点", SYSTEM_WAN_W5500, true, false, false, true},
     /* 单 PHY：W5500 不可同时作 WAN 与 ETH_LAN；8/9 仅占位，mode_allowed 会拒绝 */
-    {8, "(无效) W5500 WAN+LAN", SYSTEM_WAN_W5500, false, true, false, true},
-    {9, "(无效) W5500 WAN+热点+有线LAN", SYSTEM_WAN_W5500, true, true, false, true},
-    {10, "仅配网：热点 + W5500 内网(LAN)", SYSTEM_WAN_NONE, true, true, false, false},
-    {11, "仅配网：热点 (无上行)", SYSTEM_WAN_NONE, true, false, false, false},
+    {8, "(无效) 有线网络 WAN+LAN", SYSTEM_WAN_W5500, false, true, false, true},
+    {9, "(无效) 有线网络 WAN+WiFi热点+LAN", SYSTEM_WAN_W5500, true, true, false, true},
+    {10, "仅配网->WiFi热点+有线网络", SYSTEM_WAN_NONE, true, true, false, false},
+    {11, "仅配网->WiFi热点", SYSTEM_WAN_NONE, true, false, false, false},
 };
 
 static system_mode_status_t s_status = {

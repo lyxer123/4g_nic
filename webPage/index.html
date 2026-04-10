@@ -5,15 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#1a3a5c" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <title>设备管理平台</title>
+  <title>网络管理</title>
   <link rel="icon" href="data:," />
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
   <div id="loginPage" class="login-page">
     <div class="login-card">
-      <h2>设备管理平台</h2>
-      <p class="muted">请先登录后再配置网络</p>
+      <h2>网络管理</h2>
       <form id="loginForm" class="form-stack">
         <div class="form-group">
           <label for="loginUser">用户名</label>
@@ -21,7 +20,7 @@
         </div>
         <div class="form-group">
           <label for="loginPass">密码</label>
-          <input class="input" id="loginPass" type="password" autocomplete="current-password" placeholder="默认 admin" />
+          <input class="input" id="loginPass" type="password" autocomplete="current-password" />
         </div>
         <p id="loginErr" class="muted" style="color:#c0392b;min-height:1.2em;"></p>
         <button type="submit" class="btn btn-primary">登录</button>
@@ -32,7 +31,7 @@
   <div class="app hidden" id="appRoot">
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-top">
-        <span class="sidebar-title">设备管理平台</span>
+        <span class="sidebar-title">网络管理</span>
         <button type="button" class="sidebar-toggle" id="sidebarToggle" title="收起菜单" aria-label="收起侧栏">◀</button>
       </div>
       <div class="sidebar-inner">
@@ -135,7 +134,7 @@
         <!-- 网络配置 -->
         <section class="page hidden" id="page-network" data-title="网络配置">
           <div class="card">
-            <div class="card-header">工作模式（先选 WAN，再选本机 LAN 组合）</div>
+            <div class="card-header">工作模式（WAN + LAN）</div>
             <div class="card-body form-stack">
               <p class="muted" id="hwProbeHint" style="margin:0 0 8px;font-size:13px;line-height:1.4;"></p>
               <div class="form-group">
@@ -143,17 +142,17 @@
                 <select id="selWanType" class="input"></select>
               </div>
               <div class="form-group">
-                <label for="selWorkMode">LAN 组合（内网：热点 / W5500 有线）</label>
+                <label for="selWorkMode">LAN 组合（内网：WiFi热点 / 有线网络）</label>
                 <select id="selWorkMode" class="input"></select>
               </div>
             </div>
           </div>
           <div class="grid-2" id="networkCardsGrid">
-            <div class="card hidden" id="ethWanPanel">
-              <div class="card-header">有线外网 W5500（ETH_WAN）</div>
+              <div class="card hidden" id="ethWanPanel">
+              <div class="card-header">有线外网（ETH_WAN）</div>
               <div class="card-body form-stack">
                 <p class="muted" style="margin: 0 0 10px; font-size: 13px; line-height: 1.45">
-                  当前模式为「W5500 作 WAN」时，RJ45 接上联路由器/光猫；此处配置本口 IP。改完后可点「保存」或仅用下方按钮提交。
+                  当前模式为「有线网络连上级路由（WAN）」时，用网线接上级路由器或光猫；此处配置本口 IP。改完后可点「保存」或仅用下方按钮提交。
                 </p>
                 <div class="form-group switch-row">
                   <label>DHCP 自动获取</label>
@@ -172,7 +171,7 @@
               <div class="card-body form-stack">
                 <div id="staSection" class="hidden">
                   <div class="form-group">
-                    <label>Wi-Fi STA（连接上级路由）</label>
+                    <label>WiFi STA（连接上级路由）</label>
                     <div class="inline-row">
                       <input class="input" id="staSsid" type="text" />
                       <button type="button" class="btn btn-secondary" id="btnScanSta">扫描</button>
@@ -194,7 +193,7 @@
 
                 <div id="wifiLanSection" class="hidden">
                   <div class="form-group">
-                    <label>WiFi LAN（热点）</label>
+                    <label>WiFi热点（SoftAP）</label>
                     <input class="input" id="lanApSsid" />
                   </div>
                   <div class="form-group">
@@ -207,7 +206,8 @@
                   </div>
                   <div class="form-group">
                     <label>WiFi密码</label>
-                    <input class="input" id="lanApPwd" type="password" />
+                    <input class="input" id="lanApPwd" type="password" autocomplete="new-password" placeholder="至少 8 位" title="WPA/WPA2 至少 8 位；修改加密或首次启用加密时请重新输入" />
+                    <p class="muted small" style="margin-top:6px">页面不显示已保存密码。改为加密或首次设置时，请填写至少 8 位密码后再点保存。</p>
                   </div>
                   <div class="form-group switch-row">
                     <label>隐藏WiFi</label>
@@ -217,7 +217,7 @@
               </div>
             </div>
             <div class="card" id="lanEthCard">
-              <div class="card-header">W5500 LAN</div>
+              <div class="card-header">有线网络</div>
               <div class="card-body form-stack">
                 <div class="form-group"><label>IP地址</label><input class="input" id="lanIp" type="text" /></div>
                 <div class="form-group"><label>子网掩码</label><input class="input" id="lanMask" type="text" /></div>
@@ -301,14 +301,27 @@
         <!-- 升级复位 -->
         <section class="page hidden" id="page-upgrade" data-title="升级/复位">
           <div class="card">
-            <div class="card-header">复位</div>
+            <div class="card-header">恢复出厂</div>
             <div class="card-body form-stack">
-              <p><button type="button" class="btn btn-warn" id="btnFactory">执行复位</button>
-              <span class="muted">清除 Web UI 相关 NVS（工作模式、WiFi STA、WAN 等）</span></p>
-              <p><button type="button" class="btn btn-secondary" id="btnExportCfg">生成备份</button></p>
-              <div class="form-group">
-                <textarea class="input textarea" id="importCfgText" placeholder="将备份 JSON 粘贴到此处"></textarea>
-                <button type="button" class="btn btn-secondary" id="btnImportCfg">导入配置</button>
+              <div class="action-block-row">
+                <button type="button" class="btn btn-warn" id="btnFactory">执行复位</button>
+                <span class="muted action-block-hint">清除 Web UI 相关 NVS（工作模式、WiFi STA、WAN 等）</span>
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">备份与导入</div>
+            <div class="card-body form-stack">
+              <p class="muted backup-lead">先导出备份保存到本地，需要时再粘贴回下方文本框。</p>
+              <div class="backup-actions">
+                <button type="button" class="btn btn-secondary" id="btnExportCfg">生成备份</button>
+              </div>
+              <div class="form-group import-stack">
+                <label for="importCfgText">备份 JSON</label>
+                <textarea class="input textarea" id="importCfgText" placeholder="将备份 JSON 粘贴到此处" rows="6"></textarea>
+                <div class="form-actions">
+                  <button type="button" class="btn btn-secondary" id="btnImportCfg">导入配置</button>
+                </div>
               </div>
             </div>
           </div>
@@ -353,19 +366,35 @@
         <!-- 重启 -->
         <section class="page hidden" id="page-reboot" data-title="重启">
           <div class="card">
-            <div class="card-header">重启系统</div>
+            <div class="card-header">立即重启</div>
             <div class="card-body form-stack">
-              <p><button type="button" class="btn btn-warn" id="btnRebootNow">执行重启</button></p>
-              <div class="form-group switch-row">
-                <label>定时重启</label>
-                <label class="switch"><input type="checkbox" id="schEn" /><span class="slider"></span></label>
+              <div class="action-block-row">
+                <button type="button" class="btn btn-warn" id="btnRebootNow">执行重启</button>
+                <span class="muted action-block-hint">设备将短暂断线，请稍候重新连接。</span>
               </div>
-              <div class="form-row">
-                <div class="form-group"><label>时</label><input class="input" type="number" id="schH" min="0" max="23" value="3" /></div>
-                <div class="form-group"><label>分</label><input class="input" type="number" id="schM" min="0" max="59" value="30" /></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header card-header-split">
+              <span>定时重启</span>
+              <label class="switch" title="启用定时重启"><input type="checkbox" id="schEn" /><span class="slider"></span></label>
+            </div>
+            <div class="card-body form-stack">
+              <p class="muted schedule-intro">每天在设定时刻自动重启（需固件侧调度器）。</p>
+              <div class="schedule-time-grid">
+                <div class="form-group time-field">
+                  <label for="schH">时</label>
+                  <input class="input" type="number" id="schH" min="0" max="23" value="3" />
+                </div>
+                <div class="form-group time-field">
+                  <label for="schM">分</label>
+                  <input class="input" type="number" id="schM" min="0" max="59" value="30" />
+                </div>
               </div>
-              <button type="button" class="btn btn-primary" id="btnSaveSchedule">保存定时设置</button>
-              <p class="muted small">定时重启任务需在固件侧集成调度器后生效；当前仅保存到 NVS。</p>
+              <div class="form-actions">
+                <button type="button" class="btn btn-primary" id="btnSaveSchedule">保存定时设置</button>
+              </div>
+              <p class="hint-callout muted small">定时重启任务需在固件侧集成调度器后生效；当前仅保存到 NVS。</p>
             </div>
           </div>
         </section>

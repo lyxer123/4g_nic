@@ -57,7 +57,8 @@ body {
 }
 
 .login-card h2 {
-  margin-bottom: 0.2rem;
+  text-align: center;
+  margin-bottom: 0.75rem;
 }
 
 body.sidebar-open {
@@ -810,6 +811,89 @@ body.sidebar-open .sidebar {
   flex-wrap: wrap;
   gap: 0.5rem;
   margin-top: 0.5rem;
+}
+
+/* 重启 / 复位页：操作行与并列 card */
+.action-block-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.65rem 1rem;
+}
+
+.action-block-row .btn {
+  flex-shrink: 0;
+}
+
+.action-block-hint {
+  flex: 1;
+  min-width: min(100%, 220px);
+  font-size: 0.84rem;
+  line-height: 1.45;
+  padding-top: 0.15rem;
+}
+
+.card-header-split {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.card-header-split > span {
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+}
+
+.backup-lead,
+.schedule-intro {
+  font-size: 0.82rem;
+  line-height: 1.45;
+  margin: 0 0 0.75rem;
+  max-width: 42em;
+}
+
+.backup-actions {
+  margin-bottom: 0.75rem;
+}
+
+.import-stack .textarea {
+  min-height: 140px;
+  max-width: 100%;
+  width: 100%;
+}
+
+.import-stack .input {
+  max-width: 100%;
+}
+
+.schedule-time-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem 1rem;
+  max-width: 280px;
+  margin-bottom: 0.35rem;
+}
+
+.schedule-time-grid .time-field {
+  margin-bottom: 0;
+}
+
+.schedule-time-grid .time-field .input {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  padding-left: 0.4rem;
+  padding-right: 0.4rem;
+}
+
+.hint-callout {
+  margin: 0.85rem 0 0;
+  padding: 0.65rem 0.75rem;
+  background: rgba(30, 111, 217, 0.06);
+  border-radius: 6px;
+  border-left: 3px solid var(--accent);
+  line-height: 1.45;
 }
 
 .section-divider {

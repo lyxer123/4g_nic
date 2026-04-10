@@ -131,7 +131,6 @@
       ['系统模式', sys.system_mode || '—'],
       ['型号', '4G_NIC'],
       ['版本', sys.firmware_version || '—'],
-      ['CPU', sys.cpu_percent != null ? sys.cpu_percent + '%' : '—'],
       ['系统时间', sys.system_time || '—'],
       ['内存', sys.memory_percent != null ? sys.memory_percent + '%' : '—'],
       ['运行时间', fmtDuration(sys.uptime_s)],
@@ -177,11 +176,11 @@
 
     const sta = byName.sta;
     if (sta) {
-      cards.push({ ...sta, name: 'WIFI_STA', signalBars: '▮▮▮▯' });
+      cards.push({ ...sta, name: 'WiFi_STA', signalBars: '▮▮▮▯' });
     }
     const ap = byName.lanrelay;
     if (ap) {
-      cards.push({ ...ap, name: 'WIFI_AP' });
+      cards.push({ ...ap, name: 'WiFi_AP' });
     }
 
     const ig = $('dashIfaces');
@@ -192,7 +191,7 @@
             '<div class="iface-card"><div class="iface-card-head"><h4>' +
             esc(x.name) +
             '</h4>' +
-            ((x.name === '4G' || x.name === 'WIFI_STA') ? '<span class="iface-signal" title="信号强度">' + esc(x.signalBars || '▮▮▮▯') + '</span>' : '') +
+            ((x.name === '4G' || x.name === 'WiFi_STA') ? '<span class="iface-signal" title="信号强度">' + esc(x.signalBars || '▮▮▮▯') + '</span>' : '') +
             '</div><dl>' +
             '<dt>地址</dt><dd>' +
             esc(x.address) +
@@ -243,10 +242,10 @@
   }
 
   const WAN_TYPE_LABEL = {
-    0: '无上行（仅配网 / 热点）',
-    1: '4G / USB 蜂窝（外网）',
-    2: 'Wi‑Fi 连上级路由（STA 外网）',
-    3: 'RJ45 W5500 作外网（WAN）',
+    0: '无上行（仅配网 / WiFi热点）',
+    1: '4g蜂窝连外网（WAN）',
+    2: 'WiFi 连上级路由（WAN）',
+    3: '有线网络连上级路由（WAN）',
   };
 
   let cachedModePayload = null;
@@ -266,12 +265,14 @@
   }
 
   function lanSummaryLabel(m) {
+    if (m.label != null && String(m.label).trim() !== '') {
+      return String(m.label).trim();
+    }
     const parts = [];
-    if (m.lan_softap) parts.push('Wi‑Fi 热点');
-    if (m.lan_eth) parts.push('W5500 作内网(LAN)');
+    if (m.lan_softap) parts.push('WiFi热点');
+    if (m.lan_eth) parts.push('有线网络');
     if (!parts.length) parts.push('无下行');
-    const title = m.label != null ? String(m.label) : '模式';
-    return title + ' — ' + parts.join(' + ');
+    return parts.join('+');
   }
 
   function fillWanSelect(modes, wanOptions) {
@@ -319,8 +320,8 @@
       return;
     }
     const bits = [];
-    bits.push('本机 Wi‑Fi 已具备');
-    bits.push('W5500：' + (hw.w5500 ? '已检测到' : '未检测到'));
+    bits.push('本机 WiFi 已具备');
+    bits.push('有线网络：' + (hw.w5500 ? '已检测到' : '未检测到'));
     bits.push('USB 蜂窝：' + (hw.usb_modem_present ? '已检测到（' + (hw.usb_ids || '') + '）' : '未检测到'));
     el.textContent = bits.join(' · ');
   }
@@ -480,17 +481,28 @@
     }
     const rowPre = selectedModeRow();
     if (rowPre && rowPre.lan_softap === true) {
-      await jfetch(API.wifiAp, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          wifi_enabled: true,
-          ssid: $('lanApSsid') ? $('lanApSsid').value.trim() : '',
-          encryption_mode: $('lanApEnc') ? $('lanApEnc').value : 'WPA2-PSK',
-          password: $('lanApPwd') ? $('lanApPwd').value : '',
-          hidden_ssid: $('lanApHidden') ? $('lanApHidden').checked : false,
-        }),
-      });
+      const enc = $('lanApEnc') ? $('lanApEnc').value : 'WPA2-PSK';
+      const pwd = $('lanApPwd') ? $('lanApPwd').value : '';
+      if (enc !== 'OPEN' && pwd.length > 0 && pwd.length < 8) {
+        toast('Wi‑Fi 密码至少 8 位', true);
+        return;
+      }
+      try {
+        await jfetch(API.wifiAp, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            wifi_enabled: true,
+            ssid: $('lanApSsid') ? $('lanApSsid').value.trim() : '',
+            encryption_mode: enc,
+            password: pwd,
+            hidden_ssid: $('lanApHidden') ? $('lanApHidden').checked : false,
+          }),
+        });
+      } catch (e) {
+        toast(e.message || String(e), true);
+        return;
+      }
     }
     if (rowPre && rowPre.needs_eth_wan) {
       await jfetch(API.ethWan, {

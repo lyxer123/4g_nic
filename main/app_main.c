@@ -47,6 +47,7 @@ void app_main(void)
     system_bridge_init_netifs_from_hw();
     (void)system_mode_manager_apply_saved_or_hw_default();
     system_wifi_dual_connect_init();
+    web_softap_restore_from_nvs();
     system_sta_baidu_probe_init();
     system_eth_uplink_debug_init();
     ESP_ERROR_CHECK(web_service_start());
