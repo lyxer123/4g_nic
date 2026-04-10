@@ -415,7 +415,6 @@
     if ($('lanDhcp')) $('lanDhcp').checked = !!lan.dhcp_enabled;
     if ($('lanStart')) $('lanStart').value = lan.dhcp_start || '';
     if ($('lanEnd')) $('lanEnd').value = lan.dhcp_end || '';
-    if ($('lanLease')) $('lanLease').value = lan.lease_hours != null ? lan.lease_hours : 12;
     if ($('lanDns1')) $('lanDns1').value = lan.dns1 || '';
     if ($('lanDns2')) $('lanDns2').value = lan.dns2 || '';
     toggleLanPanels();
@@ -520,7 +519,6 @@
         dhcp_enabled: $('lanDhcp').checked,
         dhcp_start: $('lanStart').value.trim(),
         dhcp_end: $('lanEnd').value.trim(),
-        lease_hours: parseInt($('lanLease').value, 10) || 12,
         dns1: $('lanDns1').value.trim(),
         dns2: $('lanDns2').value.trim(),
       },
