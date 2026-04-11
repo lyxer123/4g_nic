@@ -57,9 +57,10 @@ def run() -> None:
         h = max(1, main_h.winfo_height())
         if w < 200:
             return
-        # 初始左右约 50/50；同时满足左右 pane 的 minsize
-        half = w // 2
-        x = max(360, min(half, w - 260))
+        # 初始左侧约 35%、右侧约 65%；同时满足左右 pane 的 minsize（360 / 260）
+        left_min, right_min = 360, 260
+        target = int(w * 0.35)
+        x = max(left_min, min(target, w - right_min))
         main_h.sash_place(0, x, h // 2)
         main_h.unbind("<Map>")
 

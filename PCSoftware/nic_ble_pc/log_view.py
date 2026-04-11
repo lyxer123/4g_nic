@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 import tkinter as tk
 from tkinter import ttk
 
@@ -85,7 +86,8 @@ class ColoredLog(ttk.Frame):
             self.text.insert(tk.END, "[BLE] ", ("src_ble",))
             self.text.insert(tk.END, line + "\n", (body_tag,))
         elif source == "serial":
-            self.text.insert(tk.END, "[串口] ", ("src_serial",))
+            ts = datetime.now().strftime("%H:%M:%S")
+            self.text.insert(tk.END, f"[串][{ts}] ", ("src_serial",))
             self.text.insert(tk.END, line + "\n", (body_tag,))
         else:
             self.text.insert(tk.END, line + "\n", (body_tag,))

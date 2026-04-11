@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -300,6 +301,63 @@ def http_check_baidu(timeout_s: float = 10.0) -> Tuple[bool, str]:
         return False, repr(e)
 
 
+def _dashboard_overview_url(base: str) -> str:
+    b = base.strip().rstrip("/")
+    if not b:
+        return ""
+    return f"{b}/api/dashboard/overview"
+
+
+def fetch_device_dashboard_overview(
+    base_url: str,
+    *,
+    timeout_s: float = 10.0,
+) -> Tuple[bool, str]:
+    """GET /api/dashboard/overview（JSON 节选写入日志，用于长测对照 WAN）。"""
+    url = _dashboard_overview_url(base_url)
+    if not url:
+        return False, "empty base_url"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; 4g-nic-pc-test/1.0)"})
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read(8192)
+            text = raw.decode("utf-8", errors="replace")
+            try:
+                data = json.loads(text)
+                compact = json.dumps(data, ensure_ascii=False)[:3500]
+                return True, compact
+            except json.JSONDecodeError:
+                return True, text[:3500]
+    except urllib.error.HTTPError as e:
+        return False, f"HTTPError {e.code} {e.reason}"
+    except Exception as e:
+        return False, repr(e)
+
+
+def windows_default_routes_ipv4() -> str:
+    if not IS_WINDOWS:
+        return "(not windows)"
+    ps = (
+        "Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' "
+        "-ErrorAction SilentlyContinue | "
+        "Select-Object InterfaceAlias,NextHop,RouteMetric | "
+        "Format-Table -AutoSize | Out-String -Width 220"
+    )
+    code, out = powershell_json(ps, timeout_s=20.0)
+    if out.strip():
+        return out.strip()
+    return out or f"(Get-NetRoute exit {code})"
+
+
+def windows_ipconfig_excerpt(max_chars: int = 9000) -> str:
+    if not IS_WINDOWS:
+        return "(not windows)"
+    code, out = run_cmd(["ipconfig", "/all"], timeout_s=45.0, oem_console=True)
+    if not out:
+        return f"(ipconfig exit {code})"
+    return out[:max_chars]
+
+
 @dataclass
 class CycleConfig:
     adapter: str
@@ -310,8 +368,47 @@ class CycleConfig:
     disabled_hold_s: float  # D：禁用后保持，至下一次启用
     test: str = "ping"  # "ping" | "http" | "ping_http"
     ping_host: str = "8.8.8.8"
-    # Wi‑Fi 专用：测热点前临时禁用所有有线网卡，避免 ping/http 仍走以太网
+    # Wi‑Fi 专用：测试全程禁用有线网卡（停止后恢复），避免 ping/http 仍走以太网
     disable_eth_for_wifi: bool = False
+    # 以太网专用：测试全程禁用无线网卡（停止后恢复），避免 ping/http 仍走 Wi‑Fi
+    disable_wifi_for_eth: bool = False
+    # 失败取证：ping 设备 LAN 口（有线 192.168.4.1 / 连 SoftAP 时常为 192.168.5.1）
+    lan_gateway_host: str = "192.168.4.1"
+    connectivity_retries: int = 3
+    retry_delay_s: float = 1.5
+    # 长测：每 N 轮 GET 一次设备 /api/dashboard/overview（空 base 或 0 则关闭）
+    dashboard_base_url: str = ""
+    dashboard_every_n_rounds: int = 0
+
+
+def _maybe_log_device_dashboard(cfg: CycleConfig, round_idx: int, log: LogFn, tag: str) -> None:
+    """每 N 轮拉取一次设备 dashboard JSON（round_idx 从 1 开始）。"""
+    interval = int(cfg.dashboard_every_n_rounds)
+    base = (cfg.dashboard_base_url or "").strip()
+    if interval <= 0 or not base:
+        return
+    if round_idx % interval != 0:
+        return
+    ok, msg = fetch_device_dashboard_overview(base)
+    log(f"{tag} 设备概览 /api/dashboard/overview（第 {round_idx} 轮）: {'OK' if ok else 'FAIL'} {msg[:3200]}")
+
+
+def log_connectivity_failure_diagnostics(cfg: CycleConfig, log: LogFn, tag: str) -> None:
+    """失败时记录：默认路由、ipconfig 节选、到设备 LAN 口的 ping，区分「无 DHCP」与「无公网」。"""
+    log(f"{tag} --- 失败取证：本机快照 ---")
+    try:
+        r = windows_default_routes_ipv4()
+        log(f"{tag} [默认路由 IPv4]\n{r}")
+    except Exception as e:
+        log(f"{tag} [默认路由] 获取失败: {e!r}")
+    try:
+        ic = windows_ipconfig_excerpt()
+        log(f"{tag} [ipconfig /all 节选]\n{ic}")
+    except Exception as e:
+        log(f"{tag} [ipconfig] 获取失败: {e!r}")
+    gw = (cfg.lan_gateway_host or "").strip() or "192.168.4.1"
+    pok, pmsg = ping_once(gw, timeout_ms=2500)
+    log(f"{tag} ping {gw}（设备 LAN，见「LAN 网关取证」配置）: {'OK' if pok else 'FAIL'}\n{pmsg[:600]}")
 
 
 def _sleep_logged(
@@ -336,7 +433,9 @@ def _sleep_logged(
 def _phase_b_test(cfg: CycleConfig, stop: threading.Event, log: LogFn, tag: str) -> bool:
     """B：执行 ping/http（或二者），并将本阶段墙钟时间补齐至 test_phase_s。"""
     t0 = time.monotonic()
-    verdict = _connectivity_test_verdict(cfg, log, tag)
+    verdict = _connectivity_test_verdict(cfg, log, tag, stop)
+    if not verdict:
+        log_connectivity_failure_diagnostics(cfg, log, tag)
     elapsed = time.monotonic() - t0
     rem = max(0.0, float(cfg.test_phase_s) - elapsed)
     if rem > 0:
@@ -346,20 +445,80 @@ def _phase_b_test(cfg: CycleConfig, stop: threading.Event, log: LogFn, tag: str)
     return verdict
 
 
-def _connectivity_test_verdict(cfg: CycleConfig, log: LogFn, tag: str) -> bool:
-    """一轮连通性检测：ping / http / 二者均测；组合模式为两者皆成功才算成功。"""
+def _wait_retry_gap(stop: threading.Event, delay_s: float) -> bool:
+    """若被 stop 打断返回 True。"""
+    if delay_s <= 0:
+        return False
+    return stop.wait(delay_s)
+
+
+def _ping_with_retries(
+    host: str,
+    cfg: CycleConfig,
+    log: LogFn,
+    tag: str,
+    label: str,
+    stop: threading.Event,
+) -> Tuple[bool, str]:
+    n = max(1, int(cfg.connectivity_retries))
+    delay = max(0.0, float(cfg.retry_delay_s))
+    last_out = ""
+    for i in range(n):
+        if stop.is_set():
+            return False, last_out
+        ok, out = ping_once(host, timeout_ms=3000)
+        last_out = out
+        if ok:
+            note = f"（第 {i + 1}/{n} 次成功）" if i > 0 else ""
+            log(f"{tag} {label}: OK{note}\n{out[:500]}")
+            return True, out
+        if i + 1 < n and _wait_retry_gap(stop, delay):
+            return False, last_out
+    log(f"{tag} {label}: FAIL（{n} 次均失败）\n{last_out[:500]}")
+    return False, last_out
+
+
+def _http_with_retries(
+    cfg: CycleConfig,
+    log: LogFn,
+    tag: str,
+    stop: threading.Event,
+) -> Tuple[bool, str]:
+    n = max(1, int(cfg.connectivity_retries))
+    delay = max(0.0, float(cfg.retry_delay_s))
+    last_msg = ""
+    for i in range(n):
+        if stop.is_set():
+            return False, last_msg
+        ok, msg = http_check_baidu()
+        last_msg = msg
+        if ok:
+            note = f"（第 {i + 1}/{n} 次成功）" if i > 0 else ""
+            log(f"{tag} baidu.com: OK{note} {msg}")
+            return True, msg
+        if i + 1 < n and _wait_retry_gap(stop, delay):
+            return False, last_msg
+    log(f"{tag} baidu.com: FAIL（{n} 次均失败） {last_msg}")
+    return False, last_msg
+
+
+def _connectivity_test_verdict(
+    cfg: CycleConfig,
+    log: LogFn,
+    tag: str,
+    stop: threading.Event,
+) -> bool:
+    """一轮连通性检测：ping / http / 二者均测；支持有限重试。"""
     if cfg.test == "http":
-        hok, hmsg = http_check_baidu()
-        log(f"{tag} baidu.com: {'OK' if hok else 'FAIL'} {hmsg}")
+        hok, _ = _http_with_retries(cfg, log, tag, stop)
         return hok
     if cfg.test == "ping_http":
-        pok, pmsg = ping_once(cfg.ping_host)
-        log(f"{tag} ping {cfg.ping_host}: {'OK' if pok else 'FAIL'}\n{pmsg[:500]}")
-        hok, hmsg = http_check_baidu()
-        log(f"{tag} baidu.com: {'OK' if hok else 'FAIL'} {hmsg}")
-        return pok and hok
-    pok, pmsg = ping_once(cfg.ping_host)
-    log(f"{tag} ping {cfg.ping_host}: {'OK' if pok else 'FAIL'}\n{pmsg[:500]}")
+        pok, _ = _ping_with_retries(cfg.ping_host, cfg, log, tag, f"ping {cfg.ping_host}", stop)
+        if not pok:
+            return False
+        hok, _ = _http_with_retries(cfg, log, tag, stop)
+        return hok
+    pok, _ = _ping_with_retries(cfg.ping_host, cfg, log, tag, f"ping {cfg.ping_host}", stop)
     return pok
 
 
@@ -393,46 +552,29 @@ def _one_wifi_cycle(
     stop: threading.Event,
     log: LogFn,
 ) -> Optional[bool]:
-    disabled_eth: List[str] = []
-    if cfg.disable_eth_for_wifi:
-        for ename in list_net_adapter_names("ethernet"):
-            ok_e, _ = set_interface_admin(ename, False)
-            if ok_e:
-                disabled_eth.append(ename)
-        if disabled_eth:
-            log(f"[Wi‑Fi] 已临时禁用有线网卡: {', '.join(disabled_eth)}")
-        else:
-            log("[Wi‑Fi] 未找到有线网卡或禁用失败（若 ping 仍通，可能仍走其它出口）")
-
-    try:
-        d, a, c = cfg.disabled_hold_s, cfg.stable_after_enable_s, cfg.stable_after_test_s
-        log(f"[Wi‑Fi] 禁用 {cfg.adapter} （D={d:g}s）…")
-        ok, msg = set_interface_admin(cfg.adapter, False)
-        log(f"[Wi‑Fi] 禁用结果: {'OK' if ok else 'FAIL'} {msg[:300]}")
-        if _sleep_logged(stop, d, log, "[Wi‑Fi]", "禁用保持", "D"):
-            return None
-        log(f"[Wi‑Fi] 启用 {cfg.adapter} （A={a:g}s）…")
-        ok2, msg2 = set_interface_admin(cfg.adapter, True)
-        log(f"[Wi‑Fi] 启用结果: {'OK' if ok2 else 'FAIL'} {msg2[:300]}")
-        log(f"[Wi‑Fi] 连接热点 {ssid!r} …")
-        wok, wmsg = wlan_connect(ssid, password, cfg.adapter)
-        log(f"[Wi‑Fi] 连接结果: {'OK' if wok else 'FAIL'} {wmsg[:1200]}")
-        if not wok:
-            log(
-                "[Wi‑Fi] 若热点使用 WPA2 密码，请在上方填写正确密码；开放热点请留空密码。"
-                " ping 成功仍可能经有线出口，请勾选「临时禁用有线网卡」。"
-            )
-        if _sleep_logged(stop, a, log, "[Wi‑Fi]", "启动后保持", "A"):
-            return None
-        verdict = _phase_b_test(cfg, stop, log, "[Wi‑Fi]")
-        if _sleep_logged(stop, c, log, "[Wi‑Fi]", "检测后保持", "C"):
-            return verdict
+    d, a, c = cfg.disabled_hold_s, cfg.stable_after_enable_s, cfg.stable_after_test_s
+    log(f"[Wi‑Fi] 禁用 {cfg.adapter} （D={d:g}s）…")
+    ok, msg = set_interface_admin(cfg.adapter, False)
+    log(f"[Wi‑Fi] 禁用结果: {'OK' if ok else 'FAIL'} {msg[:300]}")
+    if _sleep_logged(stop, d, log, "[Wi‑Fi]", "禁用保持", "D"):
+        return None
+    log(f"[Wi‑Fi] 启用 {cfg.adapter} （A={a:g}s）…")
+    ok2, msg2 = set_interface_admin(cfg.adapter, True)
+    log(f"[Wi‑Fi] 启用结果: {'OK' if ok2 else 'FAIL'} {msg2[:300]}")
+    log(f"[Wi‑Fi] 连接热点 {ssid!r} …")
+    wok, wmsg = wlan_connect(ssid, password, cfg.adapter)
+    log(f"[Wi‑Fi] 连接结果: {'OK' if wok else 'FAIL'} {wmsg[:1200]}")
+    if not wok:
+        log(
+            "[Wi‑Fi] 若热点使用 WPA2 密码，请在上方填写正确密码；开放热点请留空密码。"
+            " ping 成功仍可能经有线出口，请勾选「测试全程禁用有线网卡」。"
+        )
+    if _sleep_logged(stop, a, log, "[Wi‑Fi]", "启动后保持", "A"):
+        return None
+    verdict = _phase_b_test(cfg, stop, log, "[Wi‑Fi]")
+    if _sleep_logged(stop, c, log, "[Wi‑Fi]", "检测后保持", "C"):
         return verdict
-    finally:
-        for ename in disabled_eth:
-            set_interface_admin(ename, True)
-        if disabled_eth:
-            log(f"[Wi‑Fi] 已恢复有线网卡: {', '.join(disabled_eth)}")
+    return verdict
 
 
 def run_eth_loop(
@@ -442,15 +584,34 @@ def run_eth_loop(
     done: Callable[[], None],
     on_cycle_result: Optional[CycleResultFn] = None,
 ) -> None:
+    disabled_wifi: List[str] = []
     try:
+        if cfg.disable_wifi_for_eth:
+            for wname in list_net_adapter_names("wifi"):
+                ok_w, _ = set_interface_admin(wname, False)
+                if ok_w:
+                    disabled_wifi.append(wname)
+            if disabled_wifi:
+                log(
+                    f"[以太网] 已禁用无线网卡（测试全程保持，停止后恢复）: {', '.join(disabled_wifi)}"
+                )
+            else:
+                log(
+                    "[以太网] 未找到无线网卡或禁用失败（若 ping 仍通，可能仍走 Wi‑Fi 或其它出口）"
+                )
         n = 0
         while not stop.is_set():
             n += 1
             log(f"======== 以太网 第 {n} 轮 ========")
+            _maybe_log_device_dashboard(cfg, n, log, "[以太网]")
             verdict = _one_eth_cycle(cfg, stop, log)
             if verdict is not None and on_cycle_result is not None:
                 on_cycle_result(verdict)
     finally:
+        for wname in disabled_wifi:
+            set_interface_admin(wname, True)
+        if disabled_wifi:
+            log(f"[以太网] 已恢复无线网卡: {', '.join(disabled_wifi)}")
         done()
 
 
@@ -463,13 +624,30 @@ def run_wifi_loop(
     done: Callable[[], None],
     on_cycle_result: Optional[CycleResultFn] = None,
 ) -> None:
+    disabled_eth: List[str] = []
     try:
+        if cfg.disable_eth_for_wifi:
+            for ename in list_net_adapter_names("ethernet"):
+                ok_e, _ = set_interface_admin(ename, False)
+                if ok_e:
+                    disabled_eth.append(ename)
+            if disabled_eth:
+                log(
+                    f"[Wi‑Fi] 已禁用有线网卡（测试全程保持，停止后恢复）: {', '.join(disabled_eth)}"
+                )
+            else:
+                log("[Wi‑Fi] 未找到有线网卡或禁用失败（若 ping 仍通，可能仍走其它出口）")
         n = 0
         while not stop.is_set():
             n += 1
             log(f"======== Wi‑Fi 第 {n} 轮 ========")
+            _maybe_log_device_dashboard(cfg, n, log, "[Wi‑Fi]")
             verdict = _one_wifi_cycle(cfg, ssid, password, stop, log)
             if verdict is not None and on_cycle_result is not None:
                 on_cycle_result(verdict)
     finally:
+        for ename in disabled_eth:
+            set_interface_admin(ename, True)
+        if disabled_eth:
+            log(f"[Wi‑Fi] 已恢复有线网卡: {', '.join(disabled_eth)}")
         done()

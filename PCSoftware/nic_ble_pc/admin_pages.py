@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, TextIO, Tuple
 
 from .device_serial import SerialApiClient, SerialApiError
 
@@ -273,11 +276,11 @@ class AdminPages:
 
             def ok(d: dict) -> None:
                 apply_dash(d if isinstance(d, dict) else {})
-                self._log("[串口] 总览已刷新")
+                self._log("总览已刷新")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("总览", str(e))
-                self._log("[串口] 总览失败: " + str(e))
+                self._log("总览失败: " + str(e))
 
             _run_bg(self.ctx.root, work, ok, er)
 
@@ -330,7 +333,7 @@ class AdminPages:
                     )
                 tot = d.get("total") if isinstance(d, dict) else None
                 foot.set(f"共 {tot if tot is not None else len(users)} 条")
-                self._log("[串口] 用户列表已刷新")
+                self._log("用户列表已刷新")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("用户列表", str(e))
@@ -499,7 +502,7 @@ class AdminPages:
             def ok(d: dict) -> None:
                 sta_ssid.set(str(d.get("ssid") or ""))
                 sta_pwd.set(str(d.get("password") or ""))
-                self._log("[串口] 已读取 STA")
+                self._log("已读取 STA")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("STA", str(e))
@@ -519,7 +522,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("STA", "已保存")
-                self._log("[串口] STA 已保存")
+                self._log("STA 已保存")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("STA", str(e))
@@ -533,7 +536,7 @@ class AdminPages:
             def ok(_: Any) -> None:
                 sta_ssid.set("")
                 sta_pwd.set("")
-                self._log("[串口] STA 已清空")
+                self._log("STA 已清空")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("STA", str(e))
@@ -762,7 +765,7 @@ class AdminPages:
                     ap_pwd.set("")
                     ap_hid.set(bool(ap.get("hidden_ssid")))
 
-                self._log("[串口] 网络配置已读取")
+                self._log("网络配置已读取")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("网络配置", str(e))
@@ -790,7 +793,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("ETH WAN", "有线 WAN 已写入，并已按当前工作模式重试应用")
-                self._log("[串口] 有线 WAN 已写")
+                self._log("有线 WAN 已写")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("ETH WAN", str(e))
@@ -862,7 +865,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("网络", "网络配置已保存")
-                self._log("[串口] /api/network/config 已 POST")
+                self._log("/api/network/config 已 POST")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("网络", str(e))
@@ -903,7 +906,7 @@ class AdminPages:
                 a.set(str(d.get("apn") or ""))
                 u.set(str(d.get("username") or ""))
                 p.set(str(d.get("password") or ""))
-                self._log("[串口] APN 已读取")
+                self._log("APN 已读取")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("APN", str(e))
@@ -916,7 +919,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("APN", "已保存")
-                self._log("[串口] APN 已保存")
+                self._log("APN 已保存")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("APN", str(e))
@@ -949,7 +952,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("密码", "已更新")
-                self._log("[串口] 管理密码已更新")
+                self._log("管理密码已更新")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("密码", str(e))
@@ -988,7 +991,7 @@ class AdminPages:
                 tzz = d.get("timezone")
                 if tzz:
                     tz.set(str(tzz))
-                self._log("[串口] 系统时间已读取")
+                self._log("系统时间已读取")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("时间", str(e))
@@ -1014,7 +1017,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("时间", "时区已保存")
-                self._log("[串口] 时区已保存")
+                self._log("时区已保存")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("时间", str(e))
@@ -1041,7 +1044,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("出厂", "已执行，请重启设备")
-                self._log("[串口] factory_reset")
+                self._log("factory_reset")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("出厂", str(e))
@@ -1060,7 +1063,7 @@ class AdminPages:
             def ok(d: dict) -> None:
                 txt.delete("1.0", tk.END)
                 txt.insert(tk.END, json.dumps(d, ensure_ascii=False, indent=2))
-                self._log("[串口] 已生成备份 JSON")
+                self._log("已生成备份 JSON")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("备份", str(e))
@@ -1086,7 +1089,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("导入", "导入成功")
-                self._log("[串口] 配置已导入")
+                self._log("配置已导入")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("导入", str(e))
@@ -1117,7 +1120,7 @@ class AdminPages:
                     logs = []
                 box.delete("1.0", tk.END)
                 box.insert(tk.END, "\n".join(str(x) for x in logs) if logs else "(无)")
-                self._log("[串口] 系统日志已刷新")
+                self._log("系统日志已刷新")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("日志", str(e))
@@ -1156,7 +1159,7 @@ class AdminPages:
                 p2.set(str(d.get("detection_ip2") or ""))
                 p3.set(str(d.get("detection_ip3") or ""))
                 p4.set(str(d.get("detection_ip4") or ""))
-                self._log("[串口] 探测地址已读取")
+                self._log("探测地址已读取")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("探测", str(e))
@@ -1177,7 +1180,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("探测", "已保存")
-                self._log("[串口] probes 已保存")
+                self._log("probes 已保存")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("探测", str(e))
@@ -1201,7 +1204,7 @@ class AdminPages:
         fr = ttk.Frame(self._container)
         self.pages["stability"] = fr
         fr.grid_columnconfigure(0, weight=1)
-        fr.grid_rowconfigure(2, weight=1)
+        fr.grid_rowconfigure(3, weight=1)
 
         if not IS_WINDOWS:
             ttk.Label(fr, text="当前非 Windows 系统，此功能不可用。", foreground="red").grid(
@@ -1212,10 +1215,70 @@ class AdminPages:
         result_lf = ttk.LabelFrame(fr, text="测试结果", padding=2)
         out = scrolledtext.ScrolledText(result_lf, height=5, wrap=tk.WORD, font=("Consolas", 9))
 
+        stab_auto = tk.BooleanVar(value=False)
+        stab_path_var = tk.StringVar(value="")
+        stab_log_state: dict[str, Optional[TextIO]] = {"fp": None}
+
+        def _stab_app_base_dir() -> Path:
+            if getattr(sys, "frozen", False):
+                return Path(sys.executable).resolve().parent
+            return Path(__file__).resolve().parent.parent
+
+        def _stab_logs_dir() -> Path:
+            return _stab_app_base_dir() / "logs"
+
+        def _close_stab_log_file() -> None:
+            fp: Optional[TextIO] = stab_log_state["fp"]
+            if fp is None:
+                return
+            try:
+                fp.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 测试结果自动记录结束\n\n")
+                fp.flush()
+                fp.close()
+            except OSError:
+                pass
+            stab_log_state["fp"] = None
+
+        def on_stab_auto_log_toggle() -> None:
+            if stab_auto.get():
+                try:
+                    d = _stab_logs_dir()
+                    d.mkdir(parents=True, exist_ok=True)
+                    path = d / f"stability_{datetime.now().strftime('%Y-%m-%d')}.log"
+                    _close_stab_log_file()
+                    fp = open(path, "a", encoding="utf-8")
+                    stab_log_state["fp"] = fp
+                    fp.write(f"\n{'='*60}\n")
+                    fp.write(
+                        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 测试结果自动记录开始  {path}\n"
+                    )
+                    fp.write(f"{'='*60}\n")
+                    fp.flush()
+                    stab_path_var.set(f"→ {path}")
+                except OSError as e:
+                    stab_auto.set(False)
+                    stab_path_var.set("")
+                    messagebox.showwarning("自动log", f"无法写入日志文件：{e}", parent=self.ctx.root)
+            else:
+                _close_stab_log_file()
+                stab_path_var.set("")
+
         def append_line(s: str) -> None:
             ts = time.strftime("%H:%M:%S")
             out.insert(tk.END, f"[{ts}] {s}\n")
             out.see(tk.END)
+            if stab_auto.get() and stab_log_state["fp"] is not None:
+                try:
+                    fts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    stab_log_state["fp"].write(f"[{fts}] {s}\n")
+                    stab_log_state["fp"].flush()
+                except OSError:
+                    stab_auto.set(False)
+                    _close_stab_log_file()
+                    stab_path_var.set("")
+                    messagebox.showwarning(
+                        "自动log", "写入失败，已关闭自动记录。", parent=self.ctx.root
+                    )
 
         def clear_test_log() -> None:
             out.delete("1.0", tk.END)
@@ -1223,6 +1286,19 @@ class AdminPages:
         result_tb = ttk.Frame(result_lf)
         result_tb.pack(fill=tk.X, anchor=tk.W, pady=(0, 2))
         ttk.Button(result_tb, text="清除", command=clear_test_log).pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            result_tb,
+            text="自动log",
+            variable=stab_auto,
+            command=on_stab_auto_log_toggle,
+        ).pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Label(
+            result_tb,
+            textvariable=stab_path_var,
+            foreground="gray",
+            font=("Segoe UI", 8),
+            wraplength=360,
+        ).pack(side=tk.LEFT, padx=(6, 0), fill=tk.X, expand=True)
         out.pack(fill=tk.BOTH, expand=True)
 
         eth_stop = threading.Event()
@@ -1231,10 +1307,10 @@ class AdminPages:
         wifi_thr: Dict[str, Optional[threading.Thread]] = {"t": None}
 
         eth_ad = tk.StringVar()
-        eth_a = tk.StringVar(value="6")
-        eth_b = tk.StringVar(value="4")
-        eth_c = tk.StringVar(value="1")
-        eth_d = tk.StringVar(value="5")
+        eth_a = tk.StringVar(value="20")
+        eth_b = tk.StringVar(value="8")
+        eth_c = tk.StringVar(value="2")
+        eth_d = tk.StringVar(value="20")
         eth_l = tk.StringVar(value="")
 
         def _eth_update_l(*_: object) -> None:
@@ -1257,10 +1333,10 @@ class AdminPages:
         wf_ad = tk.StringVar()
         wf_ssid = tk.StringVar()
         wf_pwd = tk.StringVar()
-        wf_a = tk.StringVar(value="15")
-        wf_b = tk.StringVar(value="4")
-        wf_c = tk.StringVar(value="1")
-        wf_d = tk.StringVar(value="15")
+        wf_a = tk.StringVar(value="20")
+        wf_b = tk.StringVar(value="8")
+        wf_c = tk.StringVar(value="2")
+        wf_d = tk.StringVar(value="20")
         wf_l = tk.StringVar(value="")
 
         def _wf_update_l(*_: object) -> None:
@@ -1301,6 +1377,12 @@ class AdminPages:
 
         eth_fr = ttk.LabelFrame(fr, text="（1）以太网：定时禁用/启用后检测", padding=4)
         eth_fr.grid(row=0, column=0, sticky=tk.EW, pady=(0, 2))
+        eth_disable_wifi = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            eth_fr,
+            text="测以太网时全程禁用 Wi‑Fi，停止后恢复（避免每轮启停不稳定，推荐开启）",
+            variable=eth_disable_wifi,
+        ).pack(anchor=tk.W, pady=(0, 2))
         er1 = ttk.Frame(eth_fr)
         er1.pack(fill=tk.X)
         eth_row0 = ttk.Frame(er1)
@@ -1312,10 +1394,10 @@ class AdminPages:
         ttk.Label(eth_row0, textvariable=eth_l, foreground="gray").pack(side=tk.LEFT)
         _ep = {"pady": (0, 2)}
         _abcd_hints = {
-            "A": "A · 启动后保持（秒）。以太网：网卡启用成功后；Wi‑Fi：连接热点成功后。再进入检测，用于链路稳定。",
-            "B": "B · 检测阶段（秒）。本阶段内执行 ping / http / 二者；若实际更快，会补齐等待至该时长。",
+            "A": "A · 启动后保持（秒）。以太网：网卡启用成功后；Wi‑Fi：连接热点成功后。再进入检测。长测勿过小：设备需完成 ETH 链路协商与 DHCPS/NAPT 重绑。",
+            "B": "B · 检测阶段（秒）。本阶段内执行 ping / http / 二者；若实际更快，会补齐等待至该时长。过小易在 NAPT 尚未就绪时判失败。",
             "C": "C · 检测后保持（秒）。检测结束至下一轮禁用网卡前的等待。",
-            "D": "D · 禁用保持（秒）。网卡禁用后保持的时长，至下一次启用。",
+            "D": "D · 禁用保持（秒）。网卡禁用后保持的时长，至下一次启用。过短会加剧 ETH 频繁 Up/Down，与固件 SoftAP 全量重跑叠加易不稳定。",
         }
         _abcd_suffix_cn = {"A": "启用", "B": "测试", "C": "保持", "D": "禁用"}
         eth_abcd = ttk.Frame(er1)
@@ -1327,8 +1409,16 @@ class AdminPages:
             ttk.Entry(pair, textvariable=var, width=5).pack(side=tk.LEFT, padx=(4, 0))
             pair.pack(side=tk.LEFT, padx=(0, tail))
             _bind_tooltip(pair, _abcd_hints[lab])
+        ttk.Label(
+            er1,
+            text="长测建议：A/B/D 勿过小（设备需 DHCPS/NAPT 重绑时间）；链路切换时避免频繁打开管理页连续拉取接口配置。",
+            foreground="gray",
+            font=("Segoe UI", 8),
+            wraplength=560,
+            justify=tk.LEFT,
+        ).grid(row=2, column=0, sticky=tk.W, pady=(0, 2))
         eth_det = ttk.Frame(er1)
-        eth_det.grid(row=2, column=0, sticky=tk.W, **_ep)
+        eth_det.grid(row=3, column=0, sticky=tk.W, **_ep)
         ttk.Label(eth_det, text="检测").pack(side=tk.LEFT)
         eth_test_fr = ttk.Frame(eth_det)
         eth_test_fr.pack(side=tk.LEFT, padx=(4, 0))
@@ -1355,7 +1445,7 @@ class AdminPages:
             self.ctx.root.after(0, _refresh_eth_stats)
 
         eth_row_btns = ttk.Frame(er1)
-        eth_row_btns.grid(row=3, column=0, sticky=tk.W, pady=(4, 0))
+        eth_row_btns.grid(row=4, column=0, sticky=tk.W, pady=(4, 0))
         eth_btns = ttk.Frame(eth_row_btns)
         eth_btns.pack(side=tk.LEFT)
         eth_btn_start = ttk.Button(eth_btns, text="开始以太网测试")
@@ -1399,6 +1489,8 @@ class AdminPages:
                 disabled_hold_s=d,
                 test=str(eth_test.get()),
                 ping_host=eth_ping.get().strip() or "8.8.8.8",
+                disable_wifi_for_eth=eth_disable_wifi.get(),
+                **_stab_adv_kwargs(),
             )
 
             def log(msg: str) -> None:
@@ -1430,7 +1522,7 @@ class AdminPages:
         wf_disable_eth = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             wf_fr,
-            text="测 Wi‑Fi 时临时禁用有线网卡（避免 ping 仍走以太网，推荐开启）",
+            text="测 Wi‑Fi 时全程禁用有线网卡，停止后恢复（避免每轮启停不稳定，推荐开启）",
             variable=wf_disable_eth,
         ).grid(row=0, column=0, sticky=tk.W, pady=(0, 2))
         wr1 = ttk.Frame(wf_fr)
@@ -1457,8 +1549,16 @@ class AdminPages:
             ttk.Entry(pair, textvariable=var, width=5).pack(side=tk.LEFT, padx=(4, 0))
             pair.pack(side=tk.LEFT, padx=(0, tail))
             _bind_tooltip(pair, _abcd_hints[lab])
+        ttk.Label(
+            wr1,
+            text="长测建议：A/B/D 勿过小；稳定性测试期间尽量少开管理页批量读配置，以免与网卡启停、NAPT 重绑争用。",
+            foreground="gray",
+            font=("Segoe UI", 8),
+            wraplength=560,
+            justify=tk.LEFT,
+        ).grid(row=3, column=0, sticky=tk.W, pady=(0, 2))
         wf_det = ttk.Frame(wr1)
-        wf_det.grid(row=3, column=0, sticky=tk.W, **_wp)
+        wf_det.grid(row=4, column=0, sticky=tk.W, **_wp)
         ttk.Label(wf_det, text="检测").pack(side=tk.LEFT)
         wf_test_fr = ttk.Frame(wf_det)
         wf_test_fr.pack(side=tk.LEFT, padx=(4, 0))
@@ -1485,7 +1585,7 @@ class AdminPages:
             self.ctx.root.after(0, _refresh_wf_stats)
 
         wf_row_btns = ttk.Frame(wr1)
-        wf_row_btns.grid(row=4, column=0, sticky=tk.W, pady=(4, 0))
+        wf_row_btns.grid(row=5, column=0, sticky=tk.W, pady=(4, 0))
         wf_btns = ttk.Frame(wf_row_btns)
         wf_btns.pack(side=tk.LEFT)
         wf_btn_start = ttk.Button(wf_btns, text="开始 Wi‑Fi 测试")
@@ -1532,6 +1632,7 @@ class AdminPages:
                 test=str(wf_test.get()),
                 ping_host=wf_ping.get().strip() or "8.8.8.8",
                 disable_eth_for_wifi=wf_disable_eth.get(),
+                **_stab_adv_kwargs(),
             )
 
             def log(msg: str) -> None:
@@ -1557,7 +1658,53 @@ class AdminPages:
         wf_btn_start.configure(command=start_wifi)
         wf_btn_stop.configure(command=stop_wifi)
 
-        result_lf.grid(row=2, column=0, sticky=tk.NSEW, pady=(4, 0))
+        stab_lan_gw = tk.StringVar(value="192.168.4.1")
+        stab_dash_url = tk.StringVar(value="http://192.168.4.1")
+        stab_dash_n = tk.StringVar(value="0")
+        stab_retries = tk.StringVar(value="3")
+        stab_retry_gap = tk.StringVar(value="1.5")
+
+        def _stab_adv_kwargs() -> dict:
+            lan = stab_lan_gw.get().strip() or "192.168.4.1"
+            try:
+                retries = int(stab_retries.get().strip() or "3")
+            except ValueError:
+                retries = 3
+            try:
+                gap = float(stab_retry_gap.get().strip() or "1.5")
+            except ValueError:
+                gap = 1.5
+            url = stab_dash_url.get().strip()
+            try:
+                dn = int(stab_dash_n.get().strip() or "0")
+            except ValueError:
+                dn = 0
+            return {
+                "lan_gateway_host": lan,
+                "connectivity_retries": max(1, retries),
+                "retry_delay_s": max(0.0, gap),
+                "dashboard_base_url": url,
+                "dashboard_every_n_rounds": max(0, dn),
+            }
+
+        adv_fr = ttk.LabelFrame(fr, text="（3）取证与长测（可选）", padding=4)
+        adv_fr.grid(row=2, column=0, sticky=tk.EW, pady=(0, 2))
+        adv_r1 = ttk.Frame(adv_fr)
+        adv_r1.pack(fill=tk.X, anchor=tk.W)
+        ttk.Label(adv_r1, text="LAN 网关取证 ping").pack(side=tk.LEFT)
+        ttk.Entry(adv_r1, textvariable=stab_lan_gw, width=14).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(adv_r1, text="重试次数").pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Entry(adv_r1, textvariable=stab_retries, width=4).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(adv_r1, text="间隔(s)").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Entry(adv_r1, textvariable=stab_retry_gap, width=5).pack(side=tk.LEFT, padx=(4, 0))
+        adv_r2 = ttk.Frame(adv_fr)
+        adv_r2.pack(fill=tk.X, anchor=tk.W, pady=(4, 0))
+        ttk.Label(adv_r2, text="设备 API 基址").pack(side=tk.LEFT)
+        ttk.Entry(adv_r2, textvariable=stab_dash_url, width=26).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(adv_r2, text="每 N 轮概览(0=关)").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Entry(adv_r2, textvariable=stab_dash_n, width=5).pack(side=tk.LEFT, padx=(4, 0))
+
+        result_lf.grid(row=3, column=0, sticky=tk.NSEW, pady=(4, 0))
         refresh_adapters()
 
     def _build_reboot(self) -> None:
@@ -1577,7 +1724,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("重启", "已发送重启指令")
-                self._log("[串口] reboot POST")
+                self._log("reboot POST")
 
             def er(e: BaseException) -> None:
                 messagebox.showwarning("重启", str(e))
@@ -1623,7 +1770,7 @@ class AdminPages:
 
             def ok(_: Any) -> None:
                 messagebox.showinfo("定时重启", "已保存")
-                self._log("[串口] reboot schedule saved")
+                self._log("reboot schedule saved")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("定时重启", str(e))
