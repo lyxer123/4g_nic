@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import sys
+from datetime import datetime
+from pathlib import Path
 import tkinter as tk
 from tkinter import PanedWindow, messagebox, ttk
-from typing import Callable, Optional
+from typing import Callable, Optional, TextIO
 
 from .admin_pages import AdminPages, PageContext, P_REBOOT, _run_bg
 from .device_serial import SerialApiClient, SerialApiError, SerialMux, list_com_ports
@@ -68,8 +71,73 @@ def run() -> None:
     log_tb.pack(fill=tk.X, anchor=tk.W, pady=(0, 2))
     log_view = ColoredLog(log_lf, max_lines=900, font=("Consolas", 9))
 
+    auto_log_var = tk.BooleanVar(value=False)
+    log_path_var = tk.StringVar(value="")
+    auto_log_state: dict[str, Optional[TextIO]] = {"fp": None}
+
+    def _app_base_dir() -> Path:
+        """打包 exe：exe 所在目录；源码运行：main.py 所在目录（PCSoftware）。"""
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve().parent
+        # nic_ble_pc/gui.py → 上级目录为 PCSoftware
+        return Path(__file__).resolve().parent.parent
+
+    def _serial_log_dir() -> Path:
+        return _app_base_dir() / "logs"
+
+    def _close_auto_log_file() -> None:
+        fp: Optional[TextIO] = auto_log_state["fp"]
+        if fp is None:
+            return
+        try:
+            fp.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 自动记录结束\n\n")
+            fp.flush()
+            fp.close()
+        except OSError:
+            pass
+        auto_log_state["fp"] = None
+
+    def on_auto_log_toggle() -> None:
+        if auto_log_var.get():
+            try:
+                d = _serial_log_dir()
+                d.mkdir(parents=True, exist_ok=True)
+                path = d / f"serial_{datetime.now().strftime('%Y-%m-%d')}.log"
+                _close_auto_log_file()
+                fp = open(path, "a", encoding="utf-8")
+                auto_log_state["fp"] = fp
+                fp.write(f"\n{'='*60}\n")
+                fp.write(
+                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 自动记录开始  {path}\n"
+                )
+                fp.write(f"{'='*60}\n")
+                fp.flush()
+                log_path_var.set(f"→ {path}")
+            except OSError as e:
+                auto_log_var.set(False)
+                log_path_var.set("")
+                messagebox.showwarning("自动log", f"无法写入日志文件：{e}", parent=root)
+        else:
+            _close_auto_log_file()
+            log_path_var.set("")
+
     def log_serial(msg: str) -> None:
-        root.after(0, lambda m=msg: log_view.append_line(m, source="serial"))
+        def _flush(m: str = msg) -> None:
+            log_view.append_line(m, source="serial")
+            if auto_log_var.get() and auto_log_state["fp"] is not None:
+                try:
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    auto_log_state["fp"].write(f"[{ts}] {m}\n")
+                    auto_log_state["fp"].flush()
+                except OSError:
+                    auto_log_var.set(False)
+                    _close_auto_log_file()
+                    log_path_var.set("")
+                    messagebox.showwarning(
+                        "自动log", "写入失败，已关闭自动记录。", parent=root
+                    )
+
+        root.after(0, _flush)
 
     mux = SerialMux(log_line=log_serial, default_timeout_s=120.0)
     api_holder: dict[str, Optional[SerialApiClient]] = {"c": None}
@@ -104,6 +172,19 @@ def run() -> None:
 
     ttk.Button(log_tb, text="清除", command=log_view.clear).pack(side=tk.LEFT)
     ttk.Button(log_tb, text="重启", command=reboot_esp32).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Checkbutton(
+        log_tb,
+        text="自动log",
+        variable=auto_log_var,
+        command=on_auto_log_toggle,
+    ).pack(side=tk.LEFT, padx=(16, 0))
+    ttk.Label(
+        log_tb,
+        textvariable=log_path_var,
+        foreground="gray",
+        font=("Segoe UI", 8),
+        wraplength=360,
+    ).pack(side=tk.LEFT, padx=(6, 0), fill=tk.X, expand=True)
     log_view.pack(fill=tk.BOTH, expand=True)
 
     connected = {"v": False}
@@ -285,6 +366,8 @@ def run() -> None:
     ).pack(fill=tk.X, padx=8, pady=(0, 6))
 
     def on_close() -> None:
+        _close_auto_log_file()
+        log_path_var.set("")
         mux.close()
         root.destroy()
 

@@ -3,13 +3,24 @@
 #   python -m PyInstaller --clean -y 4g_nic_pc.spec
 # 或在 Windows 上双击 / 运行 build_windows.bat
 
+import os
+
+# PyInstaller 执行 spec 时注入 SPEC（本文件绝对路径）
+_SPEC_DIR = os.path.dirname(os.path.abspath(SPEC))
+_APP_ICO = os.path.join(_SPEC_DIR, "nic_ble_pc", "app_icon.ico")
+_APP_PNG = os.path.join(_SPEC_DIR, "nic_ble_pc", "app_icon.png")
+
 block_cipher = None
 
 a = Analysis(
     ["main.py"],
-    pathex=[],
+    pathex=[_SPEC_DIR],
     binaries=[],
-    datas=[],
+    # 与 nic_ble_pc/gui.py 运行时 iconbitmap/iconphoto 一致，否则 onefile 解压目录里可能没有 ico/png
+    datas=[
+        (_APP_ICO, "nic_ble_pc"),
+        (_APP_PNG, "nic_ble_pc"),
+    ],
     hiddenimports=[
         "serial",
         "serial.tools.list_ports",
@@ -48,4 +59,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=_APP_ICO,
 )
