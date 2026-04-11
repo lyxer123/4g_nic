@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import tkinter as tk
 from tkinter import PanedWindow, messagebox, ttk
 from typing import Callable, Optional
 
-from .admin_pages import AdminPages, PageContext
+from .admin_pages import AdminPages, PageContext, P_REBOOT, _run_bg
 from .device_serial import SerialApiClient, SerialApiError, SerialMux, list_com_ports
 from .log_view import ColoredLog
 
@@ -17,6 +18,19 @@ def run() -> None:
     root = tk.Tk()
     root.title(BASE_TITLE)
     root.minsize(1180, 620)
+
+    _base = os.path.dirname(os.path.abspath(__file__))
+    _ico = os.path.join(_base, "app_icon.ico")
+    try:
+        root.iconbitmap(_ico)
+    except tk.TclError:
+        _png = os.path.join(_base, "app_icon.png")
+        try:
+            _img = tk.PhotoImage(file=_png)
+            root.iconphoto(True, _img)
+            root._app_icon = _img  # keep ref; otherwise GC clears taskbar/title icon
+        except tk.TclError:
+            pass
 
     # 经典 PanedWindow：中间有可拖拽的分隔条（sash），左右按比例伸缩
     main_h = PanedWindow(
@@ -40,8 +54,9 @@ def run() -> None:
         h = max(1, main_h.winfo_height())
         if w < 200:
             return
-        # Python 3.11+ 的 PanedWindow 无 sashpos，用 Tcl 层的 sash_place（x 为水平分割位置）
-        x = max(360, min(int(w * 0.62), w - 280))
+        # 初始左右约 50/50；同时满足左右 pane 的 minsize
+        half = w // 2
+        x = max(360, min(half, w - 260))
         main_h.sash_place(0, x, h // 2)
         main_h.unbind("<Map>")
 
@@ -49,8 +64,9 @@ def run() -> None:
 
     log_lf = ttk.LabelFrame(right, text="串口信息", padding=(0, 4, 0, 0))
     log_lf.pack(fill=tk.BOTH, expand=True)
+    log_tb = ttk.Frame(log_lf)
+    log_tb.pack(fill=tk.X, anchor=tk.W, pady=(0, 2))
     log_view = ColoredLog(log_lf, max_lines=900, font=("Consolas", 9))
-    log_view.pack(fill=tk.BOTH, expand=True)
 
     def log_serial(msg: str) -> None:
         root.after(0, lambda m=msg: log_view.append_line(m, source="serial"))
@@ -63,6 +79,32 @@ def run() -> None:
         if c is None:
             raise SerialApiError("请先连接串口（菜单 → 连接设置）")
         return c
+
+    def reboot_esp32() -> None:
+        if not messagebox.askyesno("重启", "确定立即重启 ESP32？", parent=root):
+            return
+
+        def work() -> None:
+            get_client().post_json(P_REBOOT, {})
+
+        def ok(_: object) -> None:
+            log_serial("[GUI] 已发送重启指令")
+            messagebox.showinfo("重启", "已发送重启指令", parent=root)
+
+        def er(e: BaseException) -> None:
+            messagebox.showwarning("重启", str(e), parent=root)
+
+        try:
+            get_client()
+        except SerialApiError as e:
+            messagebox.showwarning("重启", str(e), parent=root)
+            return
+
+        _run_bg(root, work, ok, er)
+
+    ttk.Button(log_tb, text="清除", command=log_view.clear).pack(side=tk.LEFT)
+    ttk.Button(log_tb, text="重启", command=reboot_esp32).pack(side=tk.LEFT, padx=(8, 0))
+    log_view.pack(fill=tk.BOTH, expand=True)
 
     connected = {"v": False}
     connection_label = {"port": "", "baud": ""}
@@ -176,6 +218,10 @@ def run() -> None:
     root.config(menu=menubar)
 
     menubar.add_command(label="连接设置…", command=show_connection_dialog)
+
+    m_stab = tk.Menu(menubar, tearoff=0)
+    menubar.add_cascade(label="稳定性测试", menu=m_stab)
+    m_stab.add_command(label="PC 网络稳定性", command=lambda: nav("stability"))
 
     m_status = tk.Menu(menubar, tearoff=0)
     menubar.add_cascade(label="状态", menu=m_status)

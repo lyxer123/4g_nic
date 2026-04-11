@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -39,6 +40,54 @@ static bool s_eth_up = false;
 static bool s_ppp_up = false;
 static uplink_t s_default = UPLINK_NONE;
 
+static const char *uplink_t_name(uplink_t u)
+{
+    switch (u) {
+    case UPLINK_WIFI_STA: return "WIFI_STA";
+    case UPLINK_ETH_WAN: return "ETH_WAN";
+    case UPLINK_USB_MODEM: return "PPP";
+    default: return "none";
+    }
+}
+
+static const char *ip_got_event_label(int32_t id, const ip_event_got_ip_t *ev)
+{
+    static char buf[40];
+    const char *ifk = (ev && ev->esp_netif) ? esp_netif_get_ifkey(ev->esp_netif) : "";
+    switch (id) {
+    case IP_EVENT_STA_GOT_IP:
+        return "STA_GOT_IP";
+    case IP_EVENT_ETH_GOT_IP:
+        snprintf(buf, sizeof(buf), "ETH_GOT_IP %s", ifk[0] ? ifk : "?");
+        return buf;
+#if CONFIG_LWIP_PPP_SUPPORT
+    case IP_EVENT_PPP_GOT_IP:
+        return "PPP_GOT_IP";
+#endif
+    default:
+        return "?";
+    }
+}
+
+static const char *ip_lost_event_label(int32_t id, const ip_event_got_ip_t *ev)
+{
+    static char buf[40];
+    const char *ifk = (ev && ev->esp_netif) ? esp_netif_get_ifkey(ev->esp_netif) : "";
+    switch (id) {
+    case IP_EVENT_STA_LOST_IP:
+        return "STA_LOST_IP";
+    case IP_EVENT_ETH_LOST_IP:
+        snprintf(buf, sizeof(buf), "ETH_LOST_IP %s", ifk[0] ? ifk : "?");
+        return buf;
+#if CONFIG_LWIP_PPP_SUPPORT
+    case IP_EVENT_PPP_LOST_IP:
+        return "PPP_LOST_IP";
+#endif
+    default:
+        return "?";
+    }
+}
+
 static void softap_napt_refresh(void)
 {
 #if CONFIG_BRIDGE_DATA_FORWARDING_NETIF_SOFTAP && CONFIG_LWIP_IPV4_NAPT
@@ -64,9 +113,53 @@ static void softap_napt_refresh(void)
         /* last resort */
         ip_napt_enable(ipi.ip.addr, 1);
     }
-    ESP_LOGI(TAG, "NAPT enabled on SoftAP " IPSTR " (netif %c%c%d)", IP2STR(&ipi.ip), lw->name[0],
-             lw->name[1], (int)lw->num);
+    ESP_LOGD(TAG, "NAPT on SoftAP " IPSTR " (%c%c%d)", IP2STR(&ipi.ip), lw->name[0], lw->name[1],
+             (int)lw->num);
 #endif /* CONFIG_BRIDGE_DATA_FORWARDING_NETIF_SOFTAP && CONFIG_LWIP_IPV4_NAPT */
+}
+
+/**
+ * iot-bridge clears the global NAPT table on ETHERNET_EVENT_DISCONNECTED (bridge_eth.c).
+ * SoftAP NAPT is re-applied in softap_napt_refresh(); ETH_LAN must be re-enabled the same way
+ * or wired clients lose NAT after cable flap while Wi-Fi still works.
+ */
+static void eth_lan_napt_refresh(void)
+{
+#if CONFIG_LWIP_IPV4_NAPT
+    esp_netif_t *eth = esp_netif_get_handle_from_ifkey("ETH_LAN");
+    if (!eth) {
+        return;
+    }
+
+    esp_netif_ip_info_t ipi;
+    if (esp_netif_get_ip_info(eth, &ipi) != ESP_OK) {
+        return;
+    }
+
+    struct netif *lw = (struct netif *)esp_netif_get_netif_impl(eth);
+    if (!lw || !netif_is_up(lw)) {
+        ESP_LOGW(TAG, "ETH_LAN lwIP netif missing or down; NAPT skipped");
+        return;
+    }
+    if (!ip_napt_enable_netif(lw, 1)) {
+        ESP_LOGE(TAG, "ip_napt_enable_netif(ETH_LAN) failed");
+        ip_napt_enable(ipi.ip.addr, 1);
+    }
+    ESP_LOGD(TAG, "NAPT on ETH_LAN " IPSTR " (%c%c%d)", IP2STR(&ipi.ip), lw->name[0], lw->name[1],
+             (int)lw->num);
+#endif
+}
+
+/**
+ * Bridge (modem/STA/WAN) already ran esp_bridge_update_dns_info() on the LAN netifs before this
+ * handler. Restarting SoftAP DHCPS here (stop + start) disconnects Wi‑Fi clients and makes Windows
+ * show "no Internet" after every PPP renew/reconnect — avoid that. Only re-bind NAPT after
+ * ip_napt_table_clear() on PPP loss / similar.
+ */
+static void lan_side_napt_only_after_uplink_ip_event(void)
+{
+    softap_napt_refresh();
+    eth_lan_napt_refresh();
 }
 
 /**
@@ -116,8 +209,9 @@ static void softap_dhcps_full_config(void)
                                           &offer_router, sizeof(offer_router)));
 
     ESP_ERROR_CHECK(esp_netif_dhcps_start(ap));
-    ESP_LOGI(TAG, "SoftAP DHCPS: DNS offer + lease pool + router (gw) reapplied");
+    ESP_LOGI(TAG, "SoftAP DHCPS full reapply (stop/start): DNS + pool + router + NAPT");
     softap_napt_refresh();
+    eth_lan_napt_refresh();
 #endif
 }
 
@@ -152,15 +246,22 @@ static void apply_default_route(uplink_t u)
 {
     if (u == s_default) return;
 
+    if (u == UPLINK_NONE) {
+        s_default = u;
+        ESP_LOGW(TAG, "Default route: no WAN (sta=%d eth_wan=%d ppp=%d)", (int)s_wifi_up, (int)s_eth_up,
+                 (int)s_ppp_up);
+        return;
+    }
+
     esp_netif_t *netif = get_uplink_netif(u);
     if (!netif) {
-        ESP_LOGW(TAG, "default uplink netif missing (%d)", (int)u);
+        ESP_LOGW(TAG, "default uplink netif missing: want %s", uplink_t_name(u));
         return;
     }
 
     esp_netif_set_default_netif(netif);
     s_default = u;
-    ESP_LOGI(TAG, "Default route: uplink %s", esp_netif_get_ifkey(netif));
+    ESP_LOGI(TAG, "Default route -> %s (%s)", uplink_t_name(u), esp_netif_get_ifkey(netif));
 }
 
 static bool ifkey_is_eth_wan(const ip_event_got_ip_t *ev)
@@ -192,10 +293,14 @@ static void on_uplink_got_ip(void *arg, esp_event_base_t base, int32_t id, void 
 #endif
 
     // Update default route according to current policy.
-    apply_default_route(choose_default_uplink());
+    uplink_t chosen = choose_default_uplink();
+    apply_default_route(chosen);
 
-    // After iot-bridge handler (DNS update / possible deauth): reapply SoftAP DHCP/NAPT.
-    softap_dhcps_full_config();
+    /* Do not call softap_dhcps_full_config() here — see lan_side_napt_only_after_uplink_ip_event(). */
+    lan_side_napt_only_after_uplink_ip_event();
+
+    ESP_LOGI(TAG, "WAN IP up: %s | uplink sta=%d eth_wan=%d ppp=%d | default=%s | LAN NAPT refresh (no DHCPS restart)",
+             ip_got_event_label(id, ev), (int)s_wifi_up, (int)s_eth_up, (int)s_ppp_up, uplink_t_name(chosen));
 
     /* Bridge / APSTA: keep Wi-Fi powersave off so coexisting STA (+ optional SoftAP) forwarding does not stall. */
     esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
@@ -209,18 +314,15 @@ static void on_uplink_lost_ip(void *arg, esp_event_base_t base, int32_t id, void
     (void)arg;
     (void)base;
 
+    ip_event_got_ip_t *ev_pkt = (ip_event_got_ip_t *)data;
+
     if (id == IP_EVENT_STA_LOST_IP) {
         s_wifi_up = false;
     }
 #if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET) || defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN)
-    if (id == IP_EVENT_ETH_LOST_IP) {
-        ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
-        if (ifkey_is_eth_wan(ev)) {
-            s_eth_up = false;
-        }
+    if (id == IP_EVENT_ETH_LOST_IP && ifkey_is_eth_wan(ev_pkt)) {
+        s_eth_up = false;
     }
-#else
-    (void)data;
 #endif
 #if CONFIG_LWIP_PPP_SUPPORT
     if (id == IP_EVENT_PPP_LOST_IP) {
@@ -228,8 +330,12 @@ static void on_uplink_lost_ip(void *arg, esp_event_base_t base, int32_t id, void
     }
 #endif
 
-    apply_default_route(choose_default_uplink());
-    softap_dhcps_full_config();
+    uplink_t chosen = choose_default_uplink();
+    apply_default_route(chosen);
+    lan_side_napt_only_after_uplink_ip_event();
+
+    ESP_LOGW(TAG, "WAN IP lost: %s | uplink sta=%d eth_wan=%d ppp=%d | default=%s | LAN NAPT re-bound",
+             ip_lost_event_label(id, ev_pkt), (int)s_wifi_up, (int)s_eth_up, (int)s_ppp_up, uplink_t_name(chosen));
 }
 
 /**
@@ -274,5 +380,6 @@ void system_wifi_dual_connect_init(void)
 
     // Initial SoftAP DHCP/NAPT setup.
     softap_dhcps_full_config();
+    ESP_LOGI(TAG, "init done: ETH link + WAN IP handlers; SoftAP DHCPS primed");
 }
 

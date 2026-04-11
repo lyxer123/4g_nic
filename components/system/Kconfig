@@ -141,4 +141,12 @@ menu "System options"
         default "39.156.66.10"
         depends on SYSTEM_ETH_UPLINK_HTTP_CHECK
 
+    config SYSTEM_STABILITY_HEAP_LOG_INTERVAL_S
+        int "Periodic heap log interval (seconds, 0=disable)"
+        default 120
+        range 0 3600
+        help
+            At INFO level, logs free heap and historical minimum (internal RAM) for diagnosing slow leaks
+            under WiFi/PPP/NAPT load. PSRAM free is included when SPIRAM is enabled. Set 0 to disable.
+
 endmenu

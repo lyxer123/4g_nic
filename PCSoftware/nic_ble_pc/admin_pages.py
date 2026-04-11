@@ -8,7 +8,7 @@ import time
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import messagebox, scrolledtext, ttk
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .device_serial import SerialApiClient, SerialApiError
 
@@ -92,6 +92,47 @@ def _run_bg(root: tk.Misc, work: Callable[[], Any], ok: Callable[[Any], None], e
     threading.Thread(target=wrap, daemon=True).start()
 
 
+def _bind_tooltip(widget: tk.Misc, text: str) -> None:
+    """鼠标悬停时显示简短说明（用于 A/B/C/D 等控件）。"""
+    tip: Dict[str, Optional[tk.Toplevel]] = {"w": None}
+
+    def on_enter(_e: tk.Event) -> None:
+        if tip["w"] is not None:
+            return
+        x = widget.winfo_rootx() + 8
+        y = widget.winfo_rooty() + widget.winfo_height() + 2
+        tw = tk.Toplevel(widget)
+        tw.wm_overrideredirect(True)
+        try:
+            tw.wm_attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        tw.wm_geometry(f"+{x}+{y}")
+        lb = tk.Label(
+            tw,
+            text=text,
+            justify=tk.LEFT,
+            background="#ffffe0",
+            foreground="#000000",
+            relief=tk.SOLID,
+            borderwidth=1,
+            padx=8,
+            pady=6,
+            font=("TkDefaultFont", 9),
+            wraplength=380,
+        )
+        lb.pack()
+        tip["w"] = tw
+
+    def on_leave(_e: tk.Event) -> None:
+        if tip["w"] is not None:
+            tip["w"].destroy()
+            tip["w"] = None
+
+    widget.bind("<Enter>", on_enter)
+    widget.bind("<Leave>", on_leave)
+
+
 class AdminPages:
     def __init__(self, parent: ttk.Frame, ctx: PageContext) -> None:
         self.ctx = ctx
@@ -111,6 +152,7 @@ class AdminPages:
         self._build_upgrade()
         self._build_logs()
         self._build_probes()
+        self._build_stability()
         self._build_reboot()
 
     def show(self, page_id: str) -> None:
@@ -128,6 +170,7 @@ class AdminPages:
             "upgrade": "升级/复位",
             "logs": "系统日志",
             "probes": "网络检测",
+            "stability": "稳定性测试",
             "reboot": "重启",
         }
         self.ctx.set_title(titles.get(page_id, page_id))
@@ -305,14 +348,22 @@ class AdminPages:
         canv = tk.Canvas(outer, highlightthickness=0)
         sb = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canv.yview)
         inner = ttk.Frame(canv)
-        inner_win = canv.create_window((0, 0), window=inner, anchor=tk.NW)
+        # Canvas 内留白：避免「工作模式 / 无线 / 有线」等框与右侧滚动条、分割条贴死
+        _net_pad_l, _net_pad_r = 4, 22
+        inner_win = canv.create_window((_net_pad_l, 0), window=inner, anchor=tk.NW)
+
+        def _inner_width_for_canvas(w: int) -> int:
+            return max(120, w - _net_pad_l - _net_pad_r)
 
         def _conf(_e: Any) -> None:
             canv.configure(scrollregion=canv.bbox("all"))
-            canv.itemconfigure(inner_win, width=canv.winfo_width())
+            canv.itemconfigure(inner_win, width=_inner_width_for_canvas(canv.winfo_width()))
 
         inner.bind("<Configure>", _conf)
-        canv.bind("<Configure>", lambda e: canv.itemconfigure(inner_win, width=e.width))
+        canv.bind(
+            "<Configure>",
+            lambda e: canv.itemconfigure(inner_win, width=_inner_width_for_canvas(e.width)),
+        )
         canv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         canv.configure(yscrollcommand=sb.set)
@@ -1137,6 +1188,377 @@ class AdminPages:
         bf.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=12)
         ttk.Button(bf, text="读取", command=load_p).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(bf, text="保存", command=save_p).pack(side=tk.LEFT)
+
+    def _build_stability(self) -> None:
+        from .stability_pc import (
+            CycleConfig,
+            IS_WINDOWS,
+            list_net_adapter_names,
+            run_eth_loop,
+            run_wifi_loop,
+        )
+
+        fr = ttk.Frame(self._container)
+        self.pages["stability"] = fr
+        fr.grid_columnconfigure(0, weight=1)
+        fr.grid_rowconfigure(2, weight=1)
+
+        if not IS_WINDOWS:
+            ttk.Label(fr, text="当前非 Windows 系统，此功能不可用。", foreground="red").grid(
+                row=0, column=0, sticky=tk.W
+            )
+            return
+
+        result_lf = ttk.LabelFrame(fr, text="测试结果", padding=2)
+        out = scrolledtext.ScrolledText(result_lf, height=5, wrap=tk.WORD, font=("Consolas", 9))
+
+        def append_line(s: str) -> None:
+            ts = time.strftime("%H:%M:%S")
+            out.insert(tk.END, f"[{ts}] {s}\n")
+            out.see(tk.END)
+
+        def clear_test_log() -> None:
+            out.delete("1.0", tk.END)
+
+        result_tb = ttk.Frame(result_lf)
+        result_tb.pack(fill=tk.X, anchor=tk.W, pady=(0, 2))
+        ttk.Button(result_tb, text="清除", command=clear_test_log).pack(side=tk.LEFT)
+        out.pack(fill=tk.BOTH, expand=True)
+
+        eth_stop = threading.Event()
+        wifi_stop = threading.Event()
+        eth_thr: Dict[str, Optional[threading.Thread]] = {"t": None}
+        wifi_thr: Dict[str, Optional[threading.Thread]] = {"t": None}
+
+        eth_ad = tk.StringVar()
+        eth_a = tk.StringVar(value="6")
+        eth_b = tk.StringVar(value="4")
+        eth_c = tk.StringVar(value="1")
+        eth_d = tk.StringVar(value="5")
+        eth_l = tk.StringVar(value="")
+
+        def _eth_update_l(*_: object) -> None:
+            try:
+                a = float(eth_a.get().strip() or "0")
+                b = float(eth_b.get().strip() or "0")
+                c = float(eth_c.get().strip() or "0")
+                d = float(eth_d.get().strip() or "0")
+                eth_l.set(f"L=A+B+C+D={a + b + c + d:g}s")
+            except ValueError:
+                eth_l.set("L=A+B+C+D=（数值无效）")
+
+        for _ev in (eth_a, eth_b, eth_c, eth_d):
+            _ev.trace_add("write", _eth_update_l)
+        _eth_update_l()
+
+        eth_test = tk.StringVar(value="ping")
+        eth_ping = tk.StringVar(value="8.8.8.8")
+
+        wf_ad = tk.StringVar()
+        wf_ssid = tk.StringVar()
+        wf_pwd = tk.StringVar()
+        wf_a = tk.StringVar(value="15")
+        wf_b = tk.StringVar(value="4")
+        wf_c = tk.StringVar(value="1")
+        wf_d = tk.StringVar(value="15")
+        wf_l = tk.StringVar(value="")
+
+        def _wf_update_l(*_: object) -> None:
+            try:
+                a = float(wf_a.get().strip() or "0")
+                b = float(wf_b.get().strip() or "0")
+                c = float(wf_c.get().strip() or "0")
+                d = float(wf_d.get().strip() or "0")
+                wf_l.set(f"L=A+B+C+D={a + b + c + d:g}s")
+            except ValueError:
+                wf_l.set("L=A+B+C+D=（数值无效）")
+
+        for _wv in (wf_a, wf_b, wf_c, wf_d):
+            _wv.trace_add("write", _wf_update_l)
+        _wf_update_l()
+
+        wf_test = tk.StringVar(value="ping")
+        wf_ping = tk.StringVar(value="8.8.8.8")
+
+        def refresh_adapters() -> None:
+            def work() -> Tuple[List[str], List[str]]:
+                return list_net_adapter_names("ethernet"), list_net_adapter_names("wifi")
+
+            def ok(pair: Any) -> None:
+                eth_names, wifi_names = pair
+                eth_combo["values"] = eth_names
+                wf_combo["values"] = wifi_names
+                if eth_names and not eth_ad.get().strip():
+                    eth_ad.set(eth_names[0])
+                if wifi_names and not wf_ad.get().strip():
+                    wf_ad.set(wifi_names[0])
+                append_line(f"适配器列表已刷新：有线 {len(eth_names)} 个，无线 {len(wifi_names)} 个")
+
+            def er(e: BaseException) -> None:
+                append_line(f"刷新适配器失败: {e!r}")
+
+            _run_bg(self.ctx.root, work, ok, er)
+
+        eth_fr = ttk.LabelFrame(fr, text="（1）以太网：定时禁用/启用后检测", padding=4)
+        eth_fr.grid(row=0, column=0, sticky=tk.EW, pady=(0, 2))
+        er1 = ttk.Frame(eth_fr)
+        er1.pack(fill=tk.X)
+        eth_row0 = ttk.Frame(er1)
+        eth_row0.grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(eth_row0, text="网卡名称").pack(side=tk.LEFT)
+        eth_combo = ttk.Combobox(eth_row0, textvariable=eth_ad, width=28)
+        eth_combo.pack(side=tk.LEFT, padx=(4, 4))
+        ttk.Button(eth_row0, text="刷新列表", command=refresh_adapters).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(eth_row0, textvariable=eth_l, foreground="gray").pack(side=tk.LEFT)
+        _ep = {"pady": (0, 2)}
+        _abcd_hints = {
+            "A": "A · 启动后保持（秒）。以太网：网卡启用成功后；Wi‑Fi：连接热点成功后。再进入检测，用于链路稳定。",
+            "B": "B · 检测阶段（秒）。本阶段内执行 ping / http / 二者；若实际更快，会补齐等待至该时长。",
+            "C": "C · 检测后保持（秒）。检测结束至下一轮禁用网卡前的等待。",
+            "D": "D · 禁用保持（秒）。网卡禁用后保持的时长，至下一次启用。",
+        }
+        _abcd_suffix_cn = {"A": "启用", "B": "测试", "C": "保持", "D": "禁用"}
+        eth_abcd = ttk.Frame(er1)
+        eth_abcd.grid(row=1, column=0, sticky=tk.W, **_ep)
+        for lab, var, tail in (("A", eth_a, 10), ("B", eth_b, 10), ("C", eth_c, 10), ("D", eth_d, 0)):
+            pair = ttk.Frame(eth_abcd)
+            ttk.Label(pair, text=lab).pack(side=tk.LEFT)
+            ttk.Label(pair, text=_abcd_suffix_cn[lab], foreground="gray").pack(side=tk.LEFT, padx=(2, 0))
+            ttk.Entry(pair, textvariable=var, width=5).pack(side=tk.LEFT, padx=(4, 0))
+            pair.pack(side=tk.LEFT, padx=(0, tail))
+            _bind_tooltip(pair, _abcd_hints[lab])
+        eth_det = ttk.Frame(er1)
+        eth_det.grid(row=2, column=0, sticky=tk.W, **_ep)
+        ttk.Label(eth_det, text="检测").pack(side=tk.LEFT)
+        eth_test_fr = ttk.Frame(eth_det)
+        eth_test_fr.pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Radiobutton(eth_test_fr, text="ping", variable=eth_test, value="ping").pack(side=tk.LEFT)
+        ttk.Radiobutton(eth_test_fr, text="http baidu", variable=eth_test, value="http").pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Radiobutton(eth_test_fr, text="ping+http baidu", variable=eth_test, value="ping_http").pack(
+            side=tk.LEFT, padx=(6, 0)
+        )
+        ttk.Label(eth_det, text="ping 目标").pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Entry(eth_det, textvariable=eth_ping, width=16).pack(side=tk.LEFT)
+
+        eth_counts = {"ok": 0, "fail": 0}
+        eth_stats_var = tk.StringVar(value="成功 0 / 失败 0 / 总计 0")
+
+        def _refresh_eth_stats() -> None:
+            t = eth_counts["ok"] + eth_counts["fail"]
+            eth_stats_var.set(f"成功 {eth_counts['ok']} / 失败 {eth_counts['fail']} / 总计 {t}")
+
+        def _on_eth_cycle(ok: bool) -> None:
+            if ok:
+                eth_counts["ok"] += 1
+            else:
+                eth_counts["fail"] += 1
+            self.ctx.root.after(0, _refresh_eth_stats)
+
+        eth_row_btns = ttk.Frame(er1)
+        eth_row_btns.grid(row=3, column=0, sticky=tk.W, pady=(4, 0))
+        eth_btns = ttk.Frame(eth_row_btns)
+        eth_btns.pack(side=tk.LEFT)
+        eth_btn_start = ttk.Button(eth_btns, text="开始以太网测试")
+        eth_btn_stop = ttk.Button(eth_btns, text="停止", state=tk.DISABLED)
+        eth_btn_start.pack(side=tk.LEFT, padx=(0, 4))
+        eth_btn_stop.pack(side=tk.LEFT)
+        ttk.Label(eth_row_btns, textvariable=eth_stats_var).pack(side=tk.LEFT, padx=(12, 0))
+
+        def eth_done() -> None:
+            eth_btn_start.configure(state=tk.NORMAL)
+            eth_btn_stop.configure(state=tk.DISABLED)
+
+        def start_eth() -> None:
+            name = eth_ad.get().strip()
+            if not name:
+                messagebox.showwarning("稳定性", "请填写以太网网卡名称", parent=self.ctx.root)
+                return
+            try:
+                a = float(eth_a.get().strip() or "0")
+                b = float(eth_b.get().strip() or "0")
+                c = float(eth_c.get().strip() or "0")
+                d = float(eth_d.get().strip() or "0")
+            except ValueError:
+                messagebox.showerror("稳定性", "时间参数无效", parent=self.ctx.root)
+                return
+            if min(a, b, c, d) < 0:
+                messagebox.showerror("稳定性", "A/B/C/D 不能为负数", parent=self.ctx.root)
+                return
+            if eth_thr["t"] and eth_thr["t"].is_alive():
+                messagebox.showinfo("稳定性", "以太网测试已在运行", parent=self.ctx.root)
+                return
+            eth_stop.clear()
+            eth_counts["ok"] = 0
+            eth_counts["fail"] = 0
+            _refresh_eth_stats()
+            cfg = CycleConfig(
+                adapter=name,
+                stable_after_enable_s=a,
+                test_phase_s=b,
+                stable_after_test_s=c,
+                disabled_hold_s=d,
+                test=str(eth_test.get()),
+                ping_host=eth_ping.get().strip() or "8.8.8.8",
+            )
+
+            def log(msg: str) -> None:
+                self.ctx.root.after(0, lambda m=msg: append_line(m))
+
+            def done() -> None:
+                self.ctx.root.after(0, eth_done)
+
+            def run() -> None:
+                run_eth_loop(cfg, eth_stop, log, done, on_cycle_result=_on_eth_cycle)
+
+            t = threading.Thread(target=run, daemon=True)
+            eth_thr["t"] = t
+            eth_btn_start.configure(state=tk.DISABLED)
+            eth_btn_stop.configure(state=tk.NORMAL)
+            append_line("--- 以太网测试开始 ---")
+            t.start()
+
+        def stop_eth() -> None:
+            eth_stop.set()
+            append_line("--- 以太网测试停止请求已发送 ---")
+
+        eth_btn_start.configure(command=start_eth)
+        eth_btn_stop.configure(command=stop_eth)
+
+        wf_fr = ttk.LabelFrame(fr, text="（2）Wi‑Fi：定时禁用/启用后连接热点并检测", padding=4)
+        wf_fr.grid(row=1, column=0, sticky=tk.EW, pady=(0, 2))
+        wf_fr.grid_columnconfigure(0, weight=1)
+        wf_disable_eth = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            wf_fr,
+            text="测 Wi‑Fi 时临时禁用有线网卡（避免 ping 仍走以太网，推荐开启）",
+            variable=wf_disable_eth,
+        ).grid(row=0, column=0, sticky=tk.W, pady=(0, 2))
+        wr1 = ttk.Frame(wf_fr)
+        wr1.grid(row=1, column=0, sticky=tk.EW)
+        _wp = {"pady": (0, 2)}
+        wf_row0 = ttk.Frame(wr1)
+        wf_row0.grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(wf_row0, text="无线网卡名称").pack(side=tk.LEFT)
+        wf_combo = ttk.Combobox(wf_row0, textvariable=wf_ad, width=24)
+        wf_combo.pack(side=tk.LEFT, padx=(4, 8))
+        ttk.Label(wf_row0, textvariable=wf_l, foreground="gray").pack(side=tk.LEFT)
+        wf_row1 = ttk.Frame(wr1)
+        wf_row1.grid(row=1, column=0, sticky=tk.W, **_wp)
+        ttk.Label(wf_row1, text="SSID").pack(side=tk.LEFT)
+        ttk.Entry(wf_row1, textvariable=wf_ssid, width=22).pack(side=tk.LEFT, padx=(2, 0))
+        ttk.Label(wf_row1, text="密码").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Entry(wf_row1, textvariable=wf_pwd, width=22, show="*").pack(side=tk.LEFT, padx=(2, 0))
+        wf_abcd = ttk.Frame(wr1)
+        wf_abcd.grid(row=2, column=0, sticky=tk.W, **_wp)
+        for lab, var, tail in (("A", wf_a, 10), ("B", wf_b, 10), ("C", wf_c, 10), ("D", wf_d, 0)):
+            pair = ttk.Frame(wf_abcd)
+            ttk.Label(pair, text=lab).pack(side=tk.LEFT)
+            ttk.Label(pair, text=_abcd_suffix_cn[lab], foreground="gray").pack(side=tk.LEFT, padx=(2, 0))
+            ttk.Entry(pair, textvariable=var, width=5).pack(side=tk.LEFT, padx=(4, 0))
+            pair.pack(side=tk.LEFT, padx=(0, tail))
+            _bind_tooltip(pair, _abcd_hints[lab])
+        wf_det = ttk.Frame(wr1)
+        wf_det.grid(row=3, column=0, sticky=tk.W, **_wp)
+        ttk.Label(wf_det, text="检测").pack(side=tk.LEFT)
+        wf_test_fr = ttk.Frame(wf_det)
+        wf_test_fr.pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Radiobutton(wf_test_fr, text="ping", variable=wf_test, value="ping").pack(side=tk.LEFT)
+        ttk.Radiobutton(wf_test_fr, text="http baidu", variable=wf_test, value="http").pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Radiobutton(wf_test_fr, text="ping+http baidu", variable=wf_test, value="ping_http").pack(
+            side=tk.LEFT, padx=(6, 0)
+        )
+        ttk.Label(wf_det, text="ping 目标").pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Entry(wf_det, textvariable=wf_ping, width=16).pack(side=tk.LEFT)
+
+        wf_counts = {"ok": 0, "fail": 0}
+        wf_stats_var = tk.StringVar(value="成功 0 / 失败 0 / 总计 0")
+
+        def _refresh_wf_stats() -> None:
+            t = wf_counts["ok"] + wf_counts["fail"]
+            wf_stats_var.set(f"成功 {wf_counts['ok']} / 失败 {wf_counts['fail']} / 总计 {t}")
+
+        def _on_wf_cycle(ok: bool) -> None:
+            if ok:
+                wf_counts["ok"] += 1
+            else:
+                wf_counts["fail"] += 1
+            self.ctx.root.after(0, _refresh_wf_stats)
+
+        wf_row_btns = ttk.Frame(wr1)
+        wf_row_btns.grid(row=4, column=0, sticky=tk.W, pady=(4, 0))
+        wf_btns = ttk.Frame(wf_row_btns)
+        wf_btns.pack(side=tk.LEFT)
+        wf_btn_start = ttk.Button(wf_btns, text="开始 Wi‑Fi 测试")
+        wf_btn_stop = ttk.Button(wf_btns, text="停止", state=tk.DISABLED)
+        wf_btn_start.pack(side=tk.LEFT, padx=(0, 4))
+        wf_btn_stop.pack(side=tk.LEFT)
+        ttk.Label(wf_row_btns, textvariable=wf_stats_var).pack(side=tk.LEFT, padx=(12, 0))
+
+        def wf_done() -> None:
+            wf_btn_start.configure(state=tk.NORMAL)
+            wf_btn_stop.configure(state=tk.DISABLED)
+
+        def start_wifi() -> None:
+            name = wf_ad.get().strip()
+            ssid = wf_ssid.get().strip()
+            pwd = wf_pwd.get()
+            if not name or not ssid:
+                messagebox.showwarning("稳定性", "请填写无线网卡名称与 SSID", parent=self.ctx.root)
+                return
+            try:
+                a = float(wf_a.get().strip() or "0")
+                b = float(wf_b.get().strip() or "0")
+                c = float(wf_c.get().strip() or "0")
+                d = float(wf_d.get().strip() or "0")
+            except ValueError:
+                messagebox.showerror("稳定性", "时间参数无效", parent=self.ctx.root)
+                return
+            if min(a, b, c, d) < 0:
+                messagebox.showerror("稳定性", "A/B/C/D 不能为负数", parent=self.ctx.root)
+                return
+            if wifi_thr["t"] and wifi_thr["t"].is_alive():
+                messagebox.showinfo("稳定性", "Wi‑Fi 测试已在运行", parent=self.ctx.root)
+                return
+            wifi_stop.clear()
+            wf_counts["ok"] = 0
+            wf_counts["fail"] = 0
+            _refresh_wf_stats()
+            cfg = CycleConfig(
+                adapter=name,
+                stable_after_enable_s=a,
+                test_phase_s=b,
+                stable_after_test_s=c,
+                disabled_hold_s=d,
+                test=str(wf_test.get()),
+                ping_host=wf_ping.get().strip() or "8.8.8.8",
+                disable_eth_for_wifi=wf_disable_eth.get(),
+            )
+
+            def log(msg: str) -> None:
+                self.ctx.root.after(0, lambda m=msg: append_line(m))
+
+            def done() -> None:
+                self.ctx.root.after(0, wf_done)
+
+            def run() -> None:
+                run_wifi_loop(cfg, ssid, pwd, wifi_stop, log, done, on_cycle_result=_on_wf_cycle)
+
+            t = threading.Thread(target=run, daemon=True)
+            wifi_thr["t"] = t
+            wf_btn_start.configure(state=tk.DISABLED)
+            wf_btn_stop.configure(state=tk.NORMAL)
+            append_line("--- Wi‑Fi 测试开始 ---")
+            t.start()
+
+        def stop_wifi() -> None:
+            wifi_stop.set()
+            append_line("--- Wi‑Fi 测试停止请求已发送 ---")
+
+        wf_btn_start.configure(command=start_wifi)
+        wf_btn_stop.configure(command=stop_wifi)
+
+        result_lf.grid(row=2, column=0, sticky=tk.NSEW, pady=(4, 0))
+        refresh_adapters()
 
     def _build_reboot(self) -> None:
         fr = ttk.LabelFrame(self._container, text="重启", padding=8)

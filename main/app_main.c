@@ -17,6 +17,7 @@
 #include "system_wifi_dual_connect.h"
 #include "system_sta_baidu_probe.h"
 #include "system_eth_uplink_debug.h"
+#include "system_stability.h"
 
 static esp_err_t esp_storage_init(void)
 {
@@ -51,6 +52,7 @@ void app_main(void)
     web_softap_restore_from_nvs();
     system_sta_baidu_probe_init();
     system_eth_uplink_debug_init();
+    (void)system_stability_init();
     ESP_ERROR_CHECK(web_service_start());
     serial_cli_start();
 }
