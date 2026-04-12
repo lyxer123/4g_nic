@@ -1,0 +1,5 @@
+upstream: https://github.com/espressif/esp-usb
+commit: ae25ee8b9219152cae43936563ffbb4d02d95025
+subpath: host/class/cdc/usb_host_cdc_acm
+apply (from repo root, backup managed_components first):
+  git apply --directory=managed_components/espressif__usb_host_cdc_acm patches/managed_components/espressif__usb_host_cdc_acm.patch

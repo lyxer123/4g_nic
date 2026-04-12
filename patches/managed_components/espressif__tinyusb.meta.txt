@@ -1,0 +1,5 @@
+upstream: https://github.com/espressif/tinyusb
+commit: c64589db1a2af04a6726f03744999d00fa70c892
+subpath: .
+apply (from repo root, backup managed_components first):
+  git apply --directory=managed_components/espressif__tinyusb patches/managed_components/espressif__tinyusb.patch

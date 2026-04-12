@@ -348,10 +348,15 @@ def run() -> None:
     menubar.add_cascade(label="稳定性测试", menu=m_stab)
     m_stab.add_command(label="PC 网络稳定性", command=lambda: nav("stability"))
 
+    m_at = tk.Menu(menubar, tearoff=0)
+    menubar.add_cascade(label="AT测试", menu=m_at)
+    m_at.add_command(label="AT 指令测试", command=lambda: nav("at_test"))
+
     i_status = menubar.index("状态")
     i_net = menubar.index("网络配置")
     i_sys = menubar.index("系统管理")
     i_stab = menubar.index("稳定性测试")
+    i_at = menubar.index("AT测试")
 
     def set_admin_menus_enabled(en: bool) -> None:
         st = tk.NORMAL if en else tk.DISABLED
@@ -359,6 +364,7 @@ def run() -> None:
         menubar.entryconfigure(i_net, state=st)
         menubar.entryconfigure(i_sys, state=st)
         menubar.entryconfigure(i_stab, state=st)
+        menubar.entryconfigure(i_at, state=st)
 
     menu_enable_ref["set_admin_menus"] = set_admin_menus_enabled
     set_admin_menus_enabled(connected["v"])
@@ -379,6 +385,8 @@ def run() -> None:
         get_client=get_client,
         log=log_serial,
         set_title=page_title_var.set,
+        send_raw_line=mux.send_raw_line,
+        is_serial_open=lambda: mux.is_open,
     )
     admin = AdminPages(page_holder, ctx)
 

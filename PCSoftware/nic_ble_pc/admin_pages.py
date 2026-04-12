@@ -160,6 +160,8 @@ class PageContext:
     get_client: Callable[[], SerialApiClient]
     log: Callable[[str], None]
     set_title: Callable[[str], None]
+    send_raw_line: Callable[[str], None]
+    is_serial_open: Callable[[], bool]
 
 
 def _run_bg(root: tk.Misc, work: Callable[[], Any], ok: Callable[[Any], None], err: Callable[[BaseException], None]) -> None:
@@ -238,6 +240,7 @@ class AdminPages:
         self._build_logs()
         self._build_probes()
         self._build_stability()
+        self._build_at_test()
         self._build_reboot()
 
     def show(self, page_id: str) -> None:
@@ -256,6 +259,7 @@ class AdminPages:
             "logs": "系统日志",
             "probes": "网络检测",
             "stability": "稳定性测试",
+            "at_test": "AT 指令测试",
             "reboot": "重启",
         }
         self.ctx.set_title(titles.get(page_id, page_id))
@@ -2049,6 +2053,74 @@ class AdminPages:
         self._stab_wf_ssid = wf_ssid
         self._stab_wf_pwd = wf_pwd
         refresh_adapters()
+
+    def _build_at_test(self) -> None:
+        fr = ttk.Frame(self._container, padding=8)
+        self.pages["at_test"] = fr
+
+        intro = (
+            "通过本机已打开的串口向 ESP32‑S3 的 UART0 发送文本行（与窗口右侧「串口信息」为同一链路）。"
+            "非 AT 行由 serial_cli 处理（如 modem_info、help）；以 AT 开头的行由嵌入式 router_at 处理（与控制台共用 UART 时生效）。"
+            "应答与设备日志均在右侧显示。"
+        )
+        ttk.Label(fr, text=intro, wraplength=640, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 12))
+
+        row = ttk.Frame(fr)
+        row.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(row, text="指令").pack(side=tk.LEFT, padx=(0, 8))
+        at_var = tk.StringVar(value="AT")
+        ent = ttk.Entry(row, textvariable=at_var, width=56)
+        ent.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+
+        def do_send() -> None:
+            if not self.ctx.is_serial_open():
+                messagebox.showwarning("AT 测试", "请先连接串口（菜单 → 连接设置）", parent=self.ctx.root)
+                return
+            text = at_var.get().strip()
+            if not text:
+                messagebox.showwarning("AT 测试", "请输入指令", parent=self.ctx.root)
+                return
+            try:
+                self.ctx.send_raw_line(text)
+            except SerialApiError as e:
+                messagebox.showwarning("AT 测试", str(e), parent=self.ctx.root)
+            except Exception as e:
+                messagebox.showerror("AT 测试", str(e), parent=self.ctx.root)
+
+        ttk.Button(row, text="发送", command=do_send, width=10).pack(side=tk.LEFT)
+        ent.bind("<Return>", lambda _e: do_send())
+
+        pf = ttk.LabelFrame(fr, text="快捷发送", padding=8)
+        pf.pack(fill=tk.X, pady=(8, 0))
+
+        presets = [
+            ("AT", "AT"),
+            ("AT+GMR", "AT+GMR"),
+            ("AT+CMD", "AT+CMD"),
+            ("AT+ROUTER", "AT+ROUTER"),
+            ("modem_info", "modem_info"),
+            ("help", "help"),
+        ]
+
+        def preset(s: str) -> None:
+            at_var.set(s)
+            do_send()
+
+        pr = ttk.Frame(pf)
+        pr.pack(fill=tk.X)
+        for i, (lab, cmd) in enumerate(presets):
+            ttk.Button(pr, text=lab, command=lambda c=cmd: preset(c)).grid(
+                row=i // 3, column=i % 3, padx=4, pady=4, sticky=tk.W
+            )
+
+        ttk.Label(
+            fr,
+            text="提示：modem_info 走 serial_cli（4G 模组信息）；AT+CMD 列出固件已实现的 AT 子集；"
+            "若 UART 与日志控制台共用，仅「像 AT 的一整行」会进 router_at。",
+            foreground="gray",
+            wraplength=640,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(16, 0))
 
     def _build_reboot(self) -> None:
         fr = ttk.LabelFrame(self._container, text="重启", padding=8)

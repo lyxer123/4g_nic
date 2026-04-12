@@ -1,0 +1,5 @@
+upstream: https://github.com/espressif/esp-iot-bridge
+commit: c71fc451bdc64d0d0de3ae74c65496bd4fe5789f
+subpath: components/iot_bridge
+apply (from repo root, backup managed_components first):
+  git apply --directory=managed_components/espressif__iot_bridge patches/managed_components/espressif__iot_bridge.patch

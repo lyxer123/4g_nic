@@ -1,0 +1,5 @@
+upstream: https://github.com/espressif/esp-usb
+commit: 6a78831eaaadd8e5fc4796b38bb41fca9815885f
+subpath: host/class/cdc/esp_modem_usb_dte
+apply (from repo root, backup managed_components first):
+  git apply --directory=managed_components/espressif__esp_modem_usb_dte patches/managed_components/espressif__esp_modem_usb_dte.patch

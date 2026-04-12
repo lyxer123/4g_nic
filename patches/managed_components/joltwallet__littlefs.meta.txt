@@ -1,0 +1,5 @@
+upstream: https://github.com/joltwallet/esp_littlefs
+commit: 92ac3c2dce8c62c4b47bdb33e8461a4670411475
+subpath: .
+apply (from repo root, backup managed_components first):
+  git apply --directory=managed_components/joltwallet__littlefs patches/managed_components/joltwallet__littlefs.patch

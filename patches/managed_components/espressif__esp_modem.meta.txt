@@ -1,0 +1,5 @@
+upstream: https://github.com/espressif/esp-protocols
+commit: ca6e2835fe53bbe0996d8f5fcbcd539a86f4bb47
+subpath: components/esp_modem
+apply (from repo root, backup managed_components first):
+  git apply --directory=managed_components/espressif__esp_modem patches/managed_components/espressif__esp_modem.patch

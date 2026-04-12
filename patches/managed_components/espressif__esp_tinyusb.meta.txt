@@ -1,0 +1,5 @@
+upstream: https://github.com/espressif/esp-usb
+commit: c0be948c1acc6ee1f7ef00ab183c571971fccefd
+subpath: device/esp_tinyusb
+apply (from repo root, backup managed_components first):
+  git apply --directory=managed_components/espressif__esp_tinyusb patches/managed_components/espressif__esp_tinyusb.patch

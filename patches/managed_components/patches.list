@@ -1,0 +1,23 @@
+# [name.patch] → apply under managed_components/<name>/ (INI style, cf. iot_bridge/patches/patches.list)
+# Regenerate: python tools/export_managed_component_patches.py
+
+[espressif__esp_modem.patch]
+    path = managed_components/espressif__esp_modem
+
+[espressif__esp_modem_usb_dte.patch]
+    path = managed_components/espressif__esp_modem_usb_dte
+
+[espressif__esp_tinyusb.patch]
+    path = managed_components/espressif__esp_tinyusb
+
+[espressif__iot_bridge.patch]
+    path = managed_components/espressif__iot_bridge
+
+[espressif__tinyusb.patch]
+    path = managed_components/espressif__tinyusb
+
+[espressif__usb_host_cdc_acm.patch]
+    path = managed_components/espressif__usb_host_cdc_acm
+
+[joltwallet__littlefs.patch]
+    path = managed_components/joltwallet__littlefs
