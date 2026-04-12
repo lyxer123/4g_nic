@@ -360,12 +360,6 @@ def run() -> None:
 
     admin.show("overview")
 
-    ttk.Label(
-        root,
-        text="串口/蓝牙参数在「连接设置」中配置；连接后标题栏显示当前串口与波特率。",
-        foreground="gray",
-    ).pack(fill=tk.X, padx=8, pady=(0, 6))
-
     def on_close() -> None:
         _close_auto_log_file()
         log_path_var.set("")

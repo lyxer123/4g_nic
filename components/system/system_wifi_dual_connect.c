@@ -19,6 +19,7 @@
 #include "esp_eth.h"
 #include "esp_netif.h"
 #include "esp_netif_net_stack.h"
+#include "esp_timer.h"
 #include "sdkconfig.h"
 #if CONFIG_LWIP_PPP_SUPPORT
 #include "esp_netif_ppp.h"
@@ -39,6 +40,12 @@ static bool s_wifi_up = false;
 static bool s_eth_up = false;
 static bool s_ppp_up = false;
 static uplink_t s_default = UPLINK_NONE;
+
+/** ETH_LAN 有线口 Up 后等待链路稳定再全量 DHCPS，避免 PC 网卡频繁启停导致连续 stop/start SoftAP DHCP。 */
+#define ETH_LAN_LINK_DEBOUNCE_US (400 * 1000)
+
+static bool s_eth_lan_link_up = false;
+static esp_timer_handle_t s_eth_lan_debounce_timer;
 
 static const char *uplink_t_name(uplink_t u)
 {
@@ -339,7 +346,26 @@ static void on_uplink_lost_ip(void *arg, esp_event_base_t base, int32_t id, void
 }
 
 /**
- * When W5500 is ETH_LAN, cable hot-plug changes downstream switching/NAPT timing; refresh SoftAP DHCP + NAPT.
+ * Link Down：bridge_eth 已清 NAPT 表；仅重绑 SoftAP NAPT，避免每次掉线都 stop/start DHCPS（会踢无线客户端）。
+ */
+static void eth_lan_link_down_lightweight(void)
+{
+    ESP_LOGI(TAG, "ETH_LAN link down → SoftAP NAPT only (no DHCPS restart)");
+    softap_napt_refresh();
+}
+
+static void eth_lan_debounce_timer_cb(void *arg)
+{
+    (void)arg;
+    if (!s_eth_lan_link_up) {
+        return;
+    }
+    ESP_LOGI(TAG, "ETH_LAN link stable → SoftAP DHCPS full reapply (debounced)");
+    softap_dhcps_full_config();
+}
+
+/**
+ * ETH_LAN 插拔：Up 侧防抖后再全量 DHCPS；Down 侧仅 NAPT，减轻与 PPP / 管理 API 并发时的 lwIP 压力。
  */
 static void on_eth_lan_link(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -354,14 +380,44 @@ static void on_eth_lan_link(void *arg, esp_event_base_t base, int32_t id, void *
     if (id != ETHERNET_EVENT_CONNECTED && id != ETHERNET_EVENT_DISCONNECTED) {
         return;
     }
-    ESP_LOGI(TAG, "ETH_LAN link %s → SoftAP DHCPS/NAPT refresh",
-             id == ETHERNET_EVENT_CONNECTED ? "up" : "down");
-    vTaskDelay(pdMS_TO_TICKS(80));
-    softap_dhcps_full_config();
+
+    if (id == ETHERNET_EVENT_DISCONNECTED) {
+        s_eth_lan_link_up = false;
+        if (s_eth_lan_debounce_timer) {
+            esp_timer_stop(s_eth_lan_debounce_timer);
+        }
+        eth_lan_link_down_lightweight();
+        return;
+    }
+
+    /* ETHERNET_EVENT_CONNECTED */
+    s_eth_lan_link_up = true;
+    if (s_eth_lan_debounce_timer) {
+        esp_timer_stop(s_eth_lan_debounce_timer);
+        esp_err_t te = esp_timer_start_once(s_eth_lan_debounce_timer, ETH_LAN_LINK_DEBOUNCE_US);
+        if (te != ESP_OK) {
+            ESP_LOGW(TAG, "ETH_LAN debounce timer start: %s — running full reapply now", esp_err_to_name(te));
+            eth_lan_debounce_timer_cb(NULL);
+        } else {
+            ESP_LOGI(TAG, "ETH_LAN link up → full DHCPS in %d ms if still stable",
+                     (int)(ETH_LAN_LINK_DEBOUNCE_US / 1000));
+        }
+    } else {
+        softap_dhcps_full_config();
+    }
 }
 
 void system_wifi_dual_connect_init(void)
 {
+    const esp_timer_create_args_t eth_lan_debounce_args = {
+        .callback = &eth_lan_debounce_timer_cb,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "eth_lan_dhcp_deb",
+        .skip_unhandled_events = false,
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&eth_lan_debounce_args, &s_eth_lan_debounce_timer));
+
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ETHERNET_EVENT_CONNECTED, &on_eth_lan_link, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ETHERNET_EVENT_DISCONNECTED, &on_eth_lan_link, NULL));
 
