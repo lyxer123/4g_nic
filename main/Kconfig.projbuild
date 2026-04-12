@@ -1,3 +1,16 @@
+menu "Application modem (PPP)"
+    depends on BRIDGE_EXTERNAL_NETIF_MODEM
+
+    config BRIDGE_MODEM_WAIT_IP_TIMEOUT_MS
+        int "Max wait for PPP to get IP after entering data mode (ms)"
+        default 120000
+        range 0 600000
+        help
+            0 = wait forever (original IoT-Bridge behavior). Non-zero avoids blocking boot when the SIM has
+            no data, wrong APN, or carrier rejects the session — bridge_modem tears down and returns NULL so
+            Ethernet/Wi-Fi can still come up.
+endmenu
+
 menu "Application Wi-Fi (STA)"
     depends on BRIDGE_EXTERNAL_NETIF_STATION
 

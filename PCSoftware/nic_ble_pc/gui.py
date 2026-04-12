@@ -172,7 +172,41 @@ def run() -> None:
         _run_bg(root, work, ok, er)
 
     ttk.Button(log_tb, text="清除", command=log_view.clear).pack(side=tk.LEFT)
-    ttk.Button(log_tb, text="重启", command=reboot_esp32).pack(side=tk.LEFT, padx=(8, 0))
+    # 与「命令」输入框宽度对齐：输入框 width 为重启按钮的 2 倍（ttk 均以字符宽计）
+    _reboot_btn_w = 7
+    ttk.Button(log_tb, text="重启", command=reboot_esp32, width=_reboot_btn_w).pack(
+        side=tk.LEFT, padx=(8, 0)
+    )
+    ttk.Label(log_tb, text="命令").pack(side=tk.LEFT, padx=(12, 4))
+    cmd_var = tk.StringVar()
+    cmd_ent = ttk.Entry(log_tb, textvariable=cmd_var, width=_reboot_btn_w * 2)
+    cmd_ent.pack(side=tk.LEFT, padx=(0, 4))
+
+    def send_serial_cmd() -> None:
+        text = cmd_var.get().strip()
+        if not text:
+            return
+        if not mux.is_open:
+            messagebox.showwarning("串口", "请先连接串口（菜单 → 连接设置）", parent=root)
+            return
+        try:
+            mux.send_raw_line(text)
+        except SerialApiError as e:
+            messagebox.showwarning("串口", str(e), parent=root)
+        except Exception as e:
+            messagebox.showerror("串口", str(e), parent=root)
+
+    btn_send_cmd = ttk.Button(log_tb, text="提交", command=send_serial_cmd, width=8)
+    btn_send_cmd.pack(side=tk.LEFT, padx=(0, 0))
+
+    def set_serial_cmd_widgets_state(en: bool) -> None:
+        st = tk.NORMAL if en else tk.DISABLED
+        cmd_ent.configure(state=st)
+        btn_send_cmd.configure(state=st)
+
+    cmd_ent.bind("<Return>", lambda _e: send_serial_cmd())
+    set_serial_cmd_widgets_state(False)
+
     ttk.Checkbutton(
         log_tb,
         text="自动log",
@@ -186,6 +220,7 @@ def run() -> None:
         font=("Segoe UI", 8),
         wraplength=360,
     ).pack(side=tk.LEFT, padx=(6, 0), fill=tk.X, expand=True)
+
     log_view.pack(fill=tk.BOTH, expand=True)
 
     connected = {"v": False}
@@ -252,6 +287,7 @@ def run() -> None:
                 refresh_window_title()
                 set_controls_connected(False)
                 log_serial("[GUI] 串口已断开")
+                set_serial_cmd_widgets_state(False)
                 fn = menu_enable_ref.get("set_admin_menus")
                 if fn:
                     fn(False)
@@ -274,6 +310,7 @@ def run() -> None:
                 refresh_window_title()
                 set_controls_connected(True)
                 log_serial(f"[GUI] 已打开 {p} @ {baud}")
+                set_serial_cmd_widgets_state(True)
                 fn = menu_enable_ref.get("set_admin_menus")
                 if fn:
                     fn(True)

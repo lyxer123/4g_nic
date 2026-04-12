@@ -22,7 +22,12 @@
 #include "sdkconfig.h"
 
 #include "serial_cli.h"
+#include "router_at.h"
 #include "web_service.h"
+
+#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM)
+#include "esp_bridge.h"
+#endif
 
 static const char *TAG = "serial_cli";
 
@@ -47,6 +52,9 @@ static int cmd_ping(int argc, char **argv);
 static int cmd_mode_get(int argc, char **argv);
 static int cmd_mode_set(int argc, char **argv);
 static int cmd_version(int argc, char **argv);
+#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM)
+static int cmd_modem_info(int argc, char **argv);
+#endif
 
 /** Find "PCAPI …" in line (e.g. after ESP log prefix); not inside identifier like "fooPCAPI". */
 static const char *find_pcapi_rest(const char *s)
@@ -87,6 +95,9 @@ static const esp_console_cmd_t s_cmds[] = {
     {.command = "mode_get", .help = "Print NVS work_mode_id", .hint = NULL, .func = cmd_mode_get, .argtable = NULL},
     {.command = "mode_set", .help = "Set work_mode_id", .hint = "<id>", .func = cmd_mode_set, .argtable = NULL},
     {.command = "version", .help = "App version", .hint = NULL, .func = cmd_version, .argtable = NULL},
+#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM)
+    {.command = "modem_info", .help = "4G SIM/module identity (UART)", .hint = NULL, .func = cmd_modem_info, .argtable = NULL},
+#endif
 };
 
 static void cli_write_raw(const char *s, size_t len)
@@ -95,6 +106,11 @@ static void cli_write_raw(const char *s, size_t len)
         return;
     }
     (void)uart_write_bytes(UART_CLI_NUM, s, len);
+}
+
+static void cli_write_raw_void(const void *data, size_t len)
+{
+    cli_write_raw((const char *)data, len);
 }
 
 static void pcapi_send_hdr(int http_status, size_t body_len)
@@ -330,7 +346,11 @@ static int cmd_help(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
+#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM)
+    cli_write("commands: help ping mode_get mode_set <id> version modem_info\r\n");
+#else
     cli_write("commands: help ping mode_get mode_set <id> version\r\n");
+#endif
     return 0;
 }
 
@@ -384,6 +404,39 @@ static int cmd_version(int argc, char **argv)
     cli_printf("ok version=%s\r\n", d->version);
     return 0;
 }
+
+#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM)
+static int cmd_modem_info(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    esp_bridge_modem_info_t mi;
+    esp_err_t e = esp_bridge_modem_get_info(&mi);
+    if (e == ESP_ERR_INVALID_STATE) {
+        cli_write("ERR modem not initialized (4G netif not created)\r\n");
+        return 1;
+    }
+    if (e != ESP_OK) {
+        cli_printf("ERR %s\r\n", esp_err_to_name(e));
+        return 1;
+    }
+    if (!mi.present) {
+        cli_write("ERR modem not present\r\n");
+        return 1;
+    }
+    cli_printf("ok modem_info ppp_has_ip=%d\r\n", mi.ppp_has_ip ? 1 : 0);
+    cli_printf("iccid=%s\r\n", mi.iccid);
+    cli_printf("imsi=%s\r\n", mi.imsi);
+    cli_printf("imei=%s\r\n", mi.imei);
+    cli_printf("operator=%s\r\n", mi.operator_name);
+    cli_printf("network_mode=%s act=%d\r\n", mi.network_mode, mi.act);
+    cli_printf("rssi=%d ber=%d\r\n", mi.rssi, mi.ber);
+    cli_printf("manufacturer=%s\r\n", mi.manufacturer);
+    cli_printf("model=%s\r\n", mi.module_name);
+    cli_printf("fw_version=%s\r\n", mi.fw_version);
+    return 0;
+}
+#endif
 
 /**
  * Logs can reach UART0 via ROM/early printf without uart_driver_install(); that path has no RX queue.
@@ -472,6 +525,13 @@ static void uart_cli_task(void *arg)
             while (*s == ' ' || *s == '\t' || *s == '\r') {
                 s++;
             }
+            int handled_at = 0;
+#if defined(CONFIG_ROUTER_AT_ENABLE) && CONFIG_ROUTER_AT_ENABLE
+            handled_at = router_at_try_handle_line(s, cli_write_raw_void) ? 1 : 0;
+#endif
+            if (handled_at) {
+                /* AT response already sent */
+            } else {
             const char *rest = find_pcapi_rest(s);
             if (rest) {
                 handle_pcapi_from(rest);
@@ -501,6 +561,7 @@ static void uart_cli_task(void *arg)
                     cli_printf("ERR run %s\r\n", esp_err_to_name(er));
                 }
                 (void)ret;
+            }
             }
         }
         cli_write("4g_nic> ");

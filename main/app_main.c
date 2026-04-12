@@ -11,6 +11,7 @@
 
 #include "web_service.h"
 #include "serial_cli.h"
+#include "router_at.h"
 #include "system_hw_presence.h"
 #include "system_mode_manager.h"
 #include "system_bridge_runtime.h"
@@ -55,4 +56,5 @@ void app_main(void)
     (void)system_stability_init();
     ESP_ERROR_CHECK(web_service_start());
     serial_cli_start();
+    router_at_start();
 }

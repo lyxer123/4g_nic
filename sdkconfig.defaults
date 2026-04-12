@@ -47,7 +47,6 @@ CONFIG_LWIP_TCP_MSS=1460
 CONFIG_LWIP_TCP_OVERSIZE_MSS=y
 # Larger TCPIP mbox reduces "pppos_input_tcpip failed with -1" when USB LTE + Wi-Fi load the stack.
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
-CONFIG_TCPIP_RECVMBOX_SIZE=64
 CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=6144
 # SPI Ethernet + DHCP: ARP-check-on-offer can stall; optional client-id can upset some routers.
 # CONFIG_LWIP_DHCP_DOES_ARP_CHECK is not set
@@ -115,3 +114,10 @@ CONFIG_BRIDGE_ETH_SPI_CLOCK_MHZ=10
 # No ETH_WAN in this topology; optional wired-WAN diagnostics off.
 # CONFIG_SYSTEM_ETH_WAN_USE_STATIC_IP is not set
 # CONFIG_SYSTEM_ETH_UPLINK_HTTP_CHECK is not set
+
+# Router AT: UART0 = share with console/serial_cli (lines starting with AT); use UART1/2 + pins for dedicated MCU port.
+CONFIG_ROUTER_AT_ENABLE=y
+CONFIG_ROUTER_AT_UART_NUM=0
+
+# PPP: do not block boot forever when SIM has no data / wrong APN (see main/Kconfig.projbuild).
+CONFIG_BRIDGE_MODEM_WAIT_IP_TIMEOUT_MS=120000

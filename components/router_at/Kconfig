@@ -1,0 +1,42 @@
+menu "Router AT (MCU)"
+
+    config ROUTER_AT_ENABLE
+        bool "Enable router AT command subset (basic commands first)"
+        default y
+        help
+            Text AT interface for an external MCU. When the AT UART matches the console UART,
+            lines starting with AT are handled by router_at; other lines stay with serial_cli / PCAPI.
+
+    config ROUTER_AT_UART_NUM
+        int "UART port number used for AT (0 / 1 / 2)"
+        default 0
+        range 0 2
+        depends on ROUTER_AT_ENABLE
+        help
+            Development: 0 shares the same UART as the ESP console / serial_cli (prefix AT… only).
+            Production: often 1 or 2 on a dedicated header. Must match board wiring.
+
+    config ROUTER_AT_UART_BAUD
+        int "Baud rate when AT uses a dedicated UART (not console-shared)"
+        default 115200
+        depends on ROUTER_AT_ENABLE
+
+    config ROUTER_AT_UART_TX_GPIO
+        int "TX GPIO when AT uses a dedicated UART"
+        default 4
+        range -1 48
+        depends on ROUTER_AT_ENABLE
+        help
+            Used only when ROUTER_AT_UART_NUM differs from CONFIG_ESP_CONSOLE_UART_NUM.
+            Set -1 to skip uart_set_pin (use IDF defaults for that port — board-dependent).
+
+    config ROUTER_AT_UART_RX_GPIO
+        int "RX GPIO when AT uses a dedicated UART"
+        default 5
+        range -1 48
+        depends on ROUTER_AT_ENABLE
+        help
+            Used only when ROUTER_AT_UART_NUM differs from CONFIG_ESP_CONSOLE_UART_NUM.
+            Set -1 to skip uart_set_pin.
+
+endmenu

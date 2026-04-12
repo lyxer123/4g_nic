@@ -38,6 +38,10 @@ typedef struct {
     char imsi[24];
     char iccid[32];
     char module_name[32];
+    /** AT+CGMI manufacturer */
+    char manufacturer[40];
+    /** Firmware / revision: Quectel AT+QGMR, else AT+CGMR / AT+GMR (may be truncated by esp_modem C-API length) */
+    char fw_version[160];
 } esp_bridge_modem_info_t;
 
 /**

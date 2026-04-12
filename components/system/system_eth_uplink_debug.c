@@ -320,15 +320,6 @@ static void on_ip_eth(void *arg, esp_event_base_t base, int32_t id, void *data)
 #endif
 }
 
-static void tick_timer(void *arg)
-{
-    (void)arg;
-    if (!esp_netif_get_handle_from_ifkey("ETH_WAN")) {
-        return;
-    }
-    dump_eth_wan("periodic");
-}
-
 void system_eth_uplink_debug_init(void)
 {
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &on_eth_state, NULL));
@@ -341,14 +332,6 @@ void system_eth_uplink_debug_init(void)
     };
     ESP_ERROR_CHECK(esp_timer_create(&dhcp_defer, &s_dhcp_defer_timer));
 #endif
-
-    const esp_timer_create_args_t targs = {
-        .callback = &tick_timer,
-        .name = "eth_uplink_tick",
-    };
-    esp_timer_handle_t tmr = NULL;
-    ESP_ERROR_CHECK(esp_timer_create(&targs, &tmr));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(tmr, 8000000));
 
     dump_eth_wan("init");
 }

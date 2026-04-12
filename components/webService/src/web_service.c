@@ -1,8 +1,6 @@
-#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -22,7 +20,6 @@
 #include "nvs.h"
 #include "esp_timer.h"
 #include "esp_system.h"
-#include "esp_chip_info.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "system_w5500_detect.h"
@@ -42,12 +39,6 @@ static bool s_running = false;
 static char s_log_ring[LOG_RING_LINES][LOG_LINE_MAX];
 static int s_log_ring_pos;
 static int s_log_ring_count;
-
-static bool httpd_recv_exact(httpd_req_t *req, char *buf, int len);
-static int httpd_post_body_length(httpd_req_t *req);
-static cJSON *parse_http_json_body(char *body);
-static cJSON *parse_http_json_body_loopback_fixup(char *body, size_t buf_cap);
-static char *http_recv_body_alloc(httpd_req_t *req, int max_len, size_t *buf_cap_out);
 
 static void log_ring_append(const char *line)
 {
@@ -70,76 +61,6 @@ static void log_ring_fmt(const char *fmt, ...)
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     log_ring_append(buf);
-}
-
-/*
- * Applying Wi-Fi / work_mode inside the HTTP handler tears down SoftAP or STA before
- * the response is sent (LWIP errno 113, "uri handler execution failed"). Defer a few
- * hundred ms so the browser gets JSON and can show toast / reconnect.
- */
-#define WEB_DEFER_APPLY_MS 450
-/** SoftAP apply runs after work_mode deferred task so STA/mode changes do not race the AP config. */
-#define WEB_DEFER_SOFTAP_MS (WEB_DEFER_APPLY_MS * 2)
-
-typedef struct {
-    uint8_t mode;
-} deferred_mode_apply_t;
-
-static void deferred_mode_apply_task(void *arg)
-{
-    deferred_mode_apply_t *d = (deferred_mode_apply_t *)arg;
-    const uint8_t m = d->mode;
-    free(d);
-    vTaskDelay(pdMS_TO_TICKS(WEB_DEFER_APPLY_MS));
-    esp_err_t e = system_mode_manager_apply(m);
-    if (e != ESP_OK) {
-        ESP_LOGW(TAG, "deferred system_mode_manager_apply(%u): %s", (unsigned)m, esp_err_to_name(e));
-    } else {
-        ESP_LOGI(TAG, "deferred system_mode_manager_apply ok mode=%u", (unsigned)m);
-    }
-    vTaskDelete(NULL);
-}
-
-static void schedule_deferred_mode_apply(uint8_t mode)
-{
-    deferred_mode_apply_t *d = malloc(sizeof(*d));
-    if (!d) {
-        ESP_LOGW(TAG, "schedule_deferred_mode_apply: oom");
-        return;
-    }
-    d->mode = mode;
-    if (xTaskCreate(deferred_mode_apply_task, "web_mode_apply", 6144, d, tskIDLE_PRIORITY + 3, NULL) != pdPASS) {
-        free(d);
-        ESP_LOGW(TAG, "schedule_deferred_mode_apply: xTaskCreate failed");
-    }
-}
-
-static void deferred_wifi_ap_set_task(void *arg)
-{
-    wifi_config_t *cfg = (wifi_config_t *)arg;
-    vTaskDelay(pdMS_TO_TICKS(WEB_DEFER_SOFTAP_MS));
-    esp_err_t werr = esp_wifi_set_config(WIFI_IF_AP, cfg);
-    if (werr != ESP_OK) {
-        ESP_LOGE(TAG, "deferred esp_wifi_set_config(AP): %s", esp_err_to_name(werr));
-    } else {
-        ESP_LOGI(TAG, "SoftAP applied: ssid=%.32s auth=%u", cfg->ap.ssid, (unsigned)cfg->ap.authmode);
-    }
-    free(cfg);
-    vTaskDelete(NULL);
-}
-
-static void schedule_deferred_wifi_ap_set(const wifi_config_t *wcfg)
-{
-    wifi_config_t *cpy = malloc(sizeof(*cpy));
-    if (!cpy) {
-        ESP_LOGW(TAG, "schedule_deferred_wifi_ap_set: oom");
-        return;
-    }
-    memcpy(cpy, wcfg, sizeof(*cpy));
-    if (xTaskCreate(deferred_wifi_ap_set_task, "web_ap_set", 4096, cpy, tskIDLE_PRIORITY + 3, NULL) != pdPASS) {
-        free(cpy);
-        ESP_LOGW(TAG, "schedule_deferred_wifi_ap_set: xTaskCreate failed");
-    }
 }
 
 #define NVS_NS_UI      "bridge_ui"
@@ -172,85 +93,6 @@ static void schedule_deferred_wifi_ap_set(const wifi_config_t *wcfg)
 #define NVS_KEY_APN     "apn_str"
 #define NVS_KEY_APNUSER "apn_user"
 #define NVS_KEY_APNPWD  "apn_pwd"
-/* Persist SoftAP (WIFI_STORAGE_RAM in iot-bridge does not survive reboot). */
-#define NVS_KEY_APSSID "ap_ssid"
-#define NVS_KEY_APPWD  "ap_pwd"
-#define NVS_KEY_APAUTH "ap_auth"
-#define NVS_KEY_APHID  "ap_hid"
-#define NVS_KEY_APCHAN "ap_chan"
-
-static esp_err_t softap_cfg_save_to_nvs(const wifi_config_t *wcfg)
-{
-    nvs_handle_t nh = 0;
-    if (nvs_open(NVS_NS_WEBUI, NVS_READWRITE, &nh) != ESP_OK) {
-        return ESP_FAIL;
-    }
-    esp_err_t e = nvs_set_str(nh, NVS_KEY_APSSID, (const char *)wcfg->ap.ssid);
-    if (e == ESP_OK) {
-        e = nvs_set_str(nh, NVS_KEY_APPWD, (const char *)wcfg->ap.password);
-    }
-    if (e == ESP_OK) {
-        e = nvs_set_u8(nh, NVS_KEY_APAUTH, (uint8_t)wcfg->ap.authmode);
-    }
-    if (e == ESP_OK) {
-        e = nvs_set_u8(nh, NVS_KEY_APHID, wcfg->ap.ssid_hidden ? 1u : 0u);
-    }
-    if (e == ESP_OK) {
-        e = nvs_set_u8(nh, NVS_KEY_APCHAN, wcfg->ap.channel);
-    }
-    if (e == ESP_OK) {
-        e = nvs_commit(nh);
-    }
-    nvs_close(nh);
-    return e;
-}
-
-void web_softap_restore_from_nvs(void)
-{
-    nvs_handle_t h = 0;
-    if (nvs_open(NVS_NS_WEBUI, NVS_READONLY, &h) != ESP_OK) {
-        return;
-    }
-    char ssid[33] = {0};
-    char pwd[65] = {0};
-    size_t n = sizeof(ssid);
-    if (nvs_get_str(h, NVS_KEY_APSSID, ssid, &n) != ESP_OK || ssid[0] == '\0') {
-        nvs_close(h);
-        return;
-    }
-    n = sizeof(pwd);
-    (void)nvs_get_str(h, NVS_KEY_APPWD, pwd, &n);
-    uint8_t auth_u8 = (uint8_t)WIFI_AUTH_WPA2_PSK;
-    (void)nvs_get_u8(h, NVS_KEY_APAUTH, &auth_u8);
-    uint8_t hid = 0;
-    (void)nvs_get_u8(h, NVS_KEY_APHID, &hid);
-    uint8_t ch = 0;
-    (void)nvs_get_u8(h, NVS_KEY_APCHAN, &ch);
-    nvs_close(h);
-
-    wifi_config_t wcfg;
-    memset(&wcfg, 0, sizeof(wcfg));
-    strlcpy((char *)wcfg.ap.ssid, ssid, sizeof(wcfg.ap.ssid));
-    strlcpy((char *)wcfg.ap.password, pwd, sizeof(wcfg.ap.password));
-    wcfg.ap.ssid_len = (uint8_t)strlen((char *)wcfg.ap.ssid);
-    wcfg.ap.channel = ch;
-    wcfg.ap.authmode = (wifi_auth_mode_t)auth_u8;
-    wcfg.ap.ssid_hidden = hid;
-    wcfg.ap.max_connection = 8;
-
-    if (wcfg.ap.authmode != WIFI_AUTH_OPEN) {
-        size_t plen = strlen((char *)wcfg.ap.password);
-        if (plen < 8 || plen > 63) {
-            ESP_LOGW(TAG, "SoftAP NVS: skip restore (PSK length %u)", (unsigned)plen);
-            return;
-        }
-    } else {
-        memset(wcfg.ap.password, 0, sizeof(wcfg.ap.password));
-    }
-
-    esp_err_t e = esp_wifi_set_config(WIFI_IF_AP, &wcfg);
-    ESP_LOGI(TAG, "SoftAP from NVS: %s ssid=%.32s auth=%u", esp_err_to_name(e), wcfg.ap.ssid, (unsigned)auth_u8);
-}
 
 static const char *tz_display_to_posix(const char *tz_display)
 {
@@ -706,17 +548,18 @@ static esp_err_t uri_wifi_get(httpd_req_t *req)
 static esp_err_t uri_wifi_post(httpd_req_t *req)
 {
     char body[256] = {0};
-    int len = httpd_post_body_length(req);
+    int len = req->content_len;
     if (len <= 0 || len >= (int)sizeof(body)) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    if (!httpd_recv_exact(req, body, len)) {
+    int r = httpd_req_recv(req, body, len);
+    if (r <= 0) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"recv failed\"}");
     }
+    body[r] = '\0';
 
-    cJSON *root = parse_http_json_body_loopback_fixup(body, sizeof(body));
+    cJSON *root = cJSON_Parse(body);
     if (!root) {
-        ESP_LOGW(TAG, "wifi/sta invalid json len=%u: %.200s", (unsigned)strlen(body), body);
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
     }
 
@@ -850,18 +693,21 @@ static esp_err_t uri_eth_wan_get(httpd_req_t *req)
 
 static esp_err_t uri_eth_wan_post(httpd_req_t *req)
 {
-    size_t body_cap = 0;
-    char *body = http_recv_body_alloc(req, 512, &body_cap);
-    if (!body) {
+    char body[320] = {0};
+    int len = req->content_len;
+    if (len <= 0 || len >= (int)sizeof(body)) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = parse_http_json_body_loopback_fixup(body, body_cap);
+    int r = httpd_req_recv(req, body, len);
+    if (r <= 0) {
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"recv failed\"}");
+    }
+    body[r] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
     if (!root) {
-        ESP_LOGW(TAG, "eth_wan invalid json len=%u", (unsigned)strlen(body));
-        free(body);
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
     }
-    free(body);
 
     cJSON *dhcp = cJSON_GetObjectItem(root, "dhcp");
     cJSON *ip = cJSON_GetObjectItem(root, "ip");
@@ -1076,15 +922,17 @@ static esp_err_t uri_mode_get(httpd_req_t *req)
 static esp_err_t uri_mode_post(httpd_req_t *req)
 {
     char body[128] = {0};
-    int len = httpd_post_body_length(req);
+    int len = req->content_len;
     if (len <= 0 || len >= (int)sizeof(body)) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    if (!httpd_recv_exact(req, body, len)) {
+    int r = httpd_req_recv(req, body, len);
+    if (r <= 0) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"recv failed\"}");
     }
+    body[r] = '\0';
 
-    cJSON *root = parse_http_json_body(body);
+    cJSON *root = cJSON_Parse(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
     }
@@ -1109,24 +957,29 @@ static esp_err_t uri_mode_post(httpd_req_t *req)
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"nvs save failed\"}");
     }
 
-    schedule_deferred_mode_apply(m);
-    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"已写入 NVS，将在应答完成后自动应用（请稍候重连 WiFi）。\"}");
+    ret = system_mode_manager_apply(m);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "mode saved but apply failed: %s", esp_err_to_name(ret));
+        return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"Saved to NVS. Apply failed now; reboot will re-apply.\"}");
+    }
+    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"Saved to NVS and applied at runtime.\"}");
 }
 
 static esp_err_t uri_mode_apply_post(httpd_req_t *req)
 {
     char body[128] = {0};
     uint8_t m = 0;
-    const int pblen = httpd_post_body_length(req);
-    if (pblen > 0) {
-        const int len = pblen;
+    if (req->content_len > 0) {
+        int len = req->content_len;
         if (len >= (int)sizeof(body)) {
             return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
         }
-        if (!httpd_recv_exact(req, body, len)) {
+        int r = httpd_req_recv(req, body, len);
+        if (r <= 0) {
             return send_json(req, 400, "{\"status\":\"error\",\"message\":\"recv failed\"}");
         }
-        cJSON *root = parse_http_json_body(body);
+        body[r] = '\0';
+        cJSON *root = cJSON_Parse(body);
         if (!root) {
             return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
         }
@@ -1148,8 +1001,13 @@ static esp_err_t uri_mode_apply_post(httpd_req_t *req)
     if (!system_mode_manager_get_profile(m)) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"unknown mode\"}");
     }
-    schedule_deferred_mode_apply(m);
-    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"将在应答完成后应用当前模式。\"}");
+    esp_err_t e = system_mode_manager_apply(m);
+    if (e != ESP_OK) {
+        char out[160];
+        snprintf(out, sizeof(out), "{\"status\":\"error\",\"message\":\"apply failed: %s\"}", esp_err_to_name(e));
+        return send_json(req, 400, out);
+    }
+    return send_json(req, 200, "{\"status\":\"success\"}");
 }
 
 static esp_err_t uri_mode_status_get(httpd_req_t *req)
@@ -1270,159 +1128,23 @@ static esp_err_t save_lan_ui(const lan_ui_cfg_t *c)
     return e;
 }
 
-/**
- * Use Content-Length header when present: loopback POST can set content_len too small
- * (truncated JSON) or too large (extra bytes after JSON → cJSON_Parse fails).
- */
-static int httpd_post_body_length(httpd_req_t *req)
+static char *http_recv_body(httpd_req_t *req, int max_len)
 {
-    char val[24];
-    if (httpd_req_get_hdr_value_str(req, "Content-Length", val, sizeof(val)) == ESP_OK) {
-        int h = atoi(val);
-        if (h > 0) {
-            const int cl = req->content_len;
-            if (cl > 0 && cl != h) {
-                ESP_LOGW(TAG, "POST Content-Length=%d content_len=%d (using header)", h, cl);
-            }
-            return h;
-        }
-    }
-    return req->content_len;
-}
-
-static void json_body_trim_inplace(char *b)
-{
-    if (!b || !b[0]) {
-        return;
-    }
-    if ((unsigned char)b[0] == 0xef && (unsigned char)b[1] == 0xbb && (unsigned char)b[2] == 0xbf) {
-        memmove(b, b + 3, strlen(b + 3) + 1);
-    }
-    char *start = b;
-    while (*start && isspace((unsigned char)*start)) {
-        start++;
-    }
-    if (start != b) {
-        memmove(b, start, strlen(start) + 1);
-    }
-    size_t n = strlen(b);
-    while (n > 0 && isspace((unsigned char)b[n - 1])) {
-        b[--n] = '\0';
-    }
-}
-
-/**
- * Parse POST JSON: trim BOM/outer space; use ParseWithOpts so strict cJSON_Parse does not
- * fail when loopback leaves non-whitespace slack after the object in the recv buffer.
- */
-static cJSON *parse_http_json_body(char *body)
-{
-    if (!body || !body[0]) {
-        return NULL;
-    }
-    json_body_trim_inplace(body);
-    const char *ep = NULL;
-    cJSON *root = cJSON_ParseWithOpts(body, &ep, (cJSON_bool)0);
-    if (!root) {
-        return NULL;
-    }
-    if (ep) {
-        while (*ep && isspace((unsigned char)*ep)) {
-            ep++;
-        }
-        if (*ep != '\0') {
-            cJSON_Delete(root);
-            return NULL;
-        }
-    }
-    return root;
-}
-
-/**
- * 127.0.0.1 loopback POST 偶发少末尾字节。
- * 1) 尝试在尾部补 1～多个 `}`（嵌套对象缺闭合、如 /api/network/config）。
- * 2) 再试补 `"}`（字符串未闭合，如 STA 密码）。
- */
-static cJSON *parse_http_json_body_loopback_fixup(char *body, size_t buf_cap)
-{
-    cJSON *root = parse_http_json_body(body);
-    if (root) {
-        return root;
-    }
-    size_t base = strlen(body);
-    if (base == 0 || buf_cap == 0 || !memchr(body, '{', base)) {
-        return NULL;
-    }
-
-    for (int n = 1; n <= 6; n++) {
-        if ((size_t)n + base + 1u > buf_cap) {
-            break;
-        }
-        body[base + (size_t)n - 1u] = '}';
-        body[base + (size_t)n] = '\0';
-        root = parse_http_json_body(body);
-        if (root) {
-            return root;
-        }
-    }
-    body[base] = '\0';
-
-    if (base > 0u && body[base - 1u] != '}' && body[base - 1u] != '"' && base + 3u <= buf_cap) {
-        body[base] = '"';
-        body[base + 1u] = '}';
-        body[base + 2u] = '\0';
-        root = parse_http_json_body(body);
-        if (root) {
-            return root;
-        }
-        body[base] = '\0';
-    }
-    return NULL;
-}
-
-/** Read exactly len bytes into buf; null-terminates buf[len]. buf must have len+1 bytes. */
-static bool httpd_recv_exact(httpd_req_t *req, char *buf, int len)
-{
-    int total = 0;
-    while (total < len) {
-        int r = httpd_req_recv(req, buf + total, len - total);
-        if (r <= 0) {
-            return false;
-        }
-        total += r;
-    }
-    buf[len] = '\0';
-    return true;
-}
-
-/**
- * 读取 POST body；多分配 16 字节便于 loopback 截断时 parse_http_json_body_loopback_fixup。
- * buf_cap_out 非空时写入 malloc 总长（= len + 1 + 16）。
- */
-static char *http_recv_body_alloc(httpd_req_t *req, int max_len, size_t *buf_cap_out)
-{
-    int len = httpd_post_body_length(req);
+    int len = req->content_len;
     if (len <= 0 || len > max_len) {
         return NULL;
     }
-    const size_t cap = (size_t)len + 1u + 16u;
-    char *buf = malloc(cap);
+    char *buf = malloc((size_t)len + 1u);
     if (!buf) {
         return NULL;
     }
-    if (!httpd_recv_exact(req, buf, len)) {
+    int r = httpd_req_recv(req, buf, len);
+    if (r <= 0) {
         free(buf);
         return NULL;
     }
-    if (buf_cap_out) {
-        *buf_cap_out = cap;
-    }
+    buf[r] = '\0';
     return buf;
-}
-
-static char *http_recv_body(httpd_req_t *req, int max_len)
-{
-    return http_recv_body_alloc(req, max_len, NULL);
 }
 
 static uint8_t pick_mode_for_ui_working_mode(const char *wm)
@@ -1469,38 +1191,6 @@ static const char *working_mode_tag_from_id(uint8_t id)
     return "4g";
 }
 
-esp_err_t web_service_get_work_mode_u8(uint8_t *out)
-{
-    if (!out) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    return load_work_mode_u8(out);
-}
-
-esp_err_t web_service_apply_work_mode_id(uint8_t m)
-{
-    if (!system_mode_manager_get_profile(m) || !system_mode_manager_mode_allowed(m)) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    esp_err_t mer = save_work_mode_u8(m);
-    if (mer != ESP_OK) {
-        return mer;
-    }
-    schedule_deferred_mode_apply(m);
-    nvs_handle_t hh = 0;
-    if (nvs_open(NVS_NS_WEBUI, NVS_READWRITE, &hh) == ESP_OK) {
-        const char *tag = working_mode_tag_from_id(m);
-        nvs_set_str(hh, NVS_KEY_UIWM, tag);
-        const system_mode_profile_t *pm = system_mode_manager_get_profile(m);
-        if (pm) {
-            nvs_set_u8(hh, NVS_KEY_WANTYPE, (uint8_t)pm->wan_type);
-        }
-        nvs_commit(hh);
-        nvs_close(hh);
-    }
-    return ESP_OK;
-}
-
 static void fmt_mac(char *out, size_t outsz, const uint8_t *m)
 {
     snprintf(out, outsz, "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
@@ -1543,69 +1233,95 @@ static const char *auth_to_enc_str(wifi_auth_mode_t a)
     }
 }
 
-#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
-/** Rolling CPU% from FreeRTOS run-time stats (idle task time vs global counter). */
-static int dashboard_cpu_load_percent(void)
+esp_err_t web_service_get_work_mode_u8(uint8_t *out)
 {
-    UBaseType_t n = uxTaskGetNumberOfTasks();
-    if (n == 0) {
-        return -1;
+    if (!out) {
+        return ESP_ERR_INVALID_ARG;
     }
-    TaskStatus_t *arr = calloc(n, sizeof(TaskStatus_t));
-    if (!arr) {
-        return -1;
-    }
-    configRUN_TIME_COUNTER_TYPE ul_total = 0;
-    UBaseType_t ntasks = uxTaskGetSystemState(arr, n, &ul_total);
-    (void)ntasks;
-
-    configRUN_TIME_COUNTER_TYPE idle_sum = 0;
-    for (UBaseType_t i = 0; i < n; i++) {
-#if portNUM_PROCESSORS > 1
-        for (BaseType_t c = 0; c < (BaseType_t)portNUM_PROCESSORS; c++) {
-            if (arr[i].xHandle == xTaskGetIdleTaskHandleForCPU(c)) {
-                idle_sum += arr[i].ulRunTimeCounter;
-                break;
-            }
-        }
-#else
-        if (arr[i].xHandle == xTaskGetIdleTaskHandle()) {
-            idle_sum += arr[i].ulRunTimeCounter;
-        }
-#endif
-    }
-    free(arr);
-
-    static configRUN_TIME_COUNTER_TYPE s_prev_rt_total;
-    static configRUN_TIME_COUNTER_TYPE s_prev_idle_sum;
-    static bool s_have_prev;
-
-    if (!s_have_prev) {
-        s_prev_rt_total = ul_total;
-        s_prev_idle_sum = idle_sum;
-        s_have_prev = true;
-        return 0;
-    }
-
-    configRUN_TIME_COUNTER_TYPE d_total = ul_total - s_prev_rt_total;
-    configRUN_TIME_COUNTER_TYPE d_idle = idle_sum - s_prev_idle_sum;
-    s_prev_rt_total = ul_total;
-    s_prev_idle_sum = idle_sum;
-    if (d_total == 0) {
-        return 0;
-    }
-
-    uint64_t idle_pct = ((uint64_t)d_idle * 100ULL) / ((uint64_t)d_total * (uint64_t)portNUM_PROCESSORS);
-    int cpu = (int)(100 - idle_pct);
-    if (cpu < 0) {
-        cpu = 0;
-    }
-    if (cpu > 100) {
-        cpu = 100;
-    }
-    return cpu;
+    return load_work_mode_u8(out);
 }
-#endif
+
+esp_err_t web_service_apply_work_mode_id(uint8_t mode_id)
+{
+    if (!system_mode_manager_get_profile(mode_id)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!system_mode_manager_mode_allowed(mode_id)) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    esp_err_t ret = save_work_mode_u8(mode_id);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ret = system_mode_manager_apply(mode_id);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    nvs_handle_t hh = 0;
+    if (nvs_open(NVS_NS_WEBUI, NVS_READWRITE, &hh) == ESP_OK) {
+        const char *tag = working_mode_tag_from_id(mode_id);
+        nvs_set_str(hh, NVS_KEY_UIWM, tag);
+        const system_mode_profile_t *pm = system_mode_manager_get_profile(mode_id);
+        if (pm) {
+            nvs_set_u8(hh, NVS_KEY_WANTYPE, (uint8_t)pm->wan_type);
+        }
+        nvs_commit(hh);
+        nvs_close(hh);
+    }
+    return ESP_OK;
+}
+
+void web_softap_restore_from_nvs(void)
+{
+    char ap_json[768] = {0};
+    nvs_handle_t h = 0;
+    if (nvs_open(NVS_NS_WEBUI, NVS_READONLY, &h) != ESP_OK) {
+        return;
+    }
+    size_t n = sizeof(ap_json);
+    if (nvs_get_str(h, NVS_KEY_APUI, ap_json, &n) != ESP_OK) {
+        nvs_close(h);
+        return;
+    }
+    nvs_close(h);
+
+    cJSON *root = cJSON_Parse(ap_json);
+    if (!root) {
+        return;
+    }
+    cJSON *ssid = cJSON_GetObjectItem(root, "ssid");
+    if (!cJSON_IsString(ssid) || ssid->valuestring[0] == '\0') {
+        cJSON_Delete(root);
+        return;
+    }
+
+    wifi_config_t wcfg = {0};
+    if (esp_wifi_get_config(WIFI_IF_AP, &wcfg) != ESP_OK) {
+        memset(&wcfg, 0, sizeof(wcfg));
+    }
+    strlcpy((char *)wcfg.ap.ssid, ssid->valuestring, sizeof(wcfg.ap.ssid));
+    cJSON *pwd = cJSON_GetObjectItem(root, "password");
+    if (cJSON_IsString(pwd)) {
+        strlcpy((char *)wcfg.ap.password, pwd->valuestring, sizeof(wcfg.ap.password));
+    }
+    cJSON *enc = cJSON_GetObjectItem(root, "encryption_mode");
+    wcfg.ap.authmode = cJSON_IsString(enc) ? enc_str_to_auth(enc->valuestring) : WIFI_AUTH_WPA2_PSK;
+    cJSON *hid = cJSON_GetObjectItem(root, "hidden_ssid");
+    wcfg.ap.ssid_hidden = (cJSON_IsBool(hid) && cJSON_IsTrue(hid)) ? 1 : 0;
+    cJSON *ch = cJSON_GetObjectItem(root, "channel");
+    if (cJSON_IsString(ch) && strcmp(ch->valuestring, "auto") != 0) {
+        wcfg.ap.channel = (uint8_t)atoi(ch->valuestring);
+    }
+    wcfg.ap.max_connection = 8;
+
+    esp_err_t e = esp_wifi_set_config(WIFI_IF_AP, &wcfg);
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "softap NVS restore: esp_wifi_set_config failed: %s", esp_err_to_name(e));
+    } else {
+        ESP_LOGI(TAG, "SoftAP config restored from NVS (ssid=%s)", wcfg.ap.ssid);
+    }
+    cJSON_Delete(root);
+}
 
 static esp_err_t uri_dashboard_overview_get(httpd_req_t *req)
 {
@@ -1620,28 +1336,12 @@ static esp_err_t uri_dashboard_overview_get(httpd_req_t *req)
     const system_mode_profile_t *prof = system_mode_manager_get_profile(mode);
     cJSON_AddStringToObject(sys, "system_mode", prof && prof->label ? prof->label : "—");
     cJSON_AddStringToObject(sys, "firmware_version", WEB_UI_FW_VERSION);
-    esp_chip_info_t chip_info;
-    esp_chip_info(&chip_info);
-    char model_str[80];
-    snprintf(model_str, sizeof(model_str), "4G_NIC (%s, %u cores)",
-             CONFIG_IDF_TARGET, (unsigned)chip_info.cores);
-    cJSON_AddStringToObject(sys, "model", model_str);
+    cJSON_AddStringToObject(sys, "model", "4G_NIC");
     size_t total = heap_caps_get_total_size(MALLOC_CAP_DEFAULT);
     size_t freeb = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
     int mem_pct = (total > 0) ? (int)((total - freeb) * 100 / total) : 0;
     cJSON_AddNumberToObject(sys, "memory_percent", mem_pct);
-#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
-    {
-        int cpu = dashboard_cpu_load_percent();
-        if (cpu < 0) {
-            cJSON_AddNullToObject(sys, "cpu_percent");
-        } else {
-            cJSON_AddNumberToObject(sys, "cpu_percent", cpu);
-        }
-    }
-#else
     cJSON_AddNullToObject(sys, "cpu_percent");
-#endif
     time_t now = time(NULL);
     struct tm tm_info;
     localtime_r(&now, &tm_info);
@@ -1799,18 +1499,15 @@ static esp_err_t uri_network_config_get(httpd_req_t *req)
 
 static esp_err_t uri_network_config_post(httpd_req_t *req)
 {
-    size_t body_cap = 0;
-    char *body = http_recv_body_alloc(req, 2048, &body_cap);
+    char *body = http_recv_body(req, 2048);
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = parse_http_json_body_loopback_fixup(body, body_cap);
+    cJSON *root = cJSON_Parse(body);
+    free(body);
     if (!root) {
-        ESP_LOGW(TAG, "network/config invalid json len=%u", (unsigned)strlen(body));
-        free(body);
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
     }
-    free(body);
     cJSON *wmid = cJSON_GetObjectItem(root, "work_mode_id");
     cJSON *wtype = cJSON_GetObjectItem(root, "wan_type");
     uint8_t m = 0;
@@ -1841,7 +1538,7 @@ static esp_err_t uri_network_config_post(httpd_req_t *req)
             cJSON_Delete(root);
             return send_json(req, 400, "{\"status\":\"error\",\"message\":\"nvs save work_mode failed\"}");
         }
-        schedule_deferred_mode_apply(m);
+        (void)system_mode_manager_apply(m);
         nvs_handle_t hh = 0;
         if (nvs_open(NVS_NS_WEBUI, NVS_READWRITE, &hh) == ESP_OK) {
             const char *tag = working_mode_tag_from_id(m);
@@ -1864,7 +1561,7 @@ static esp_err_t uri_network_config_post(httpd_req_t *req)
             }
             uint8_t mid = pick_mode_for_ui_working_mode(wm->valuestring);
             save_work_mode_u8(mid);
-            schedule_deferred_mode_apply(mid);
+            system_mode_manager_apply(mid);
             nvs_handle_t wh = 0;
             if (nvs_open(NVS_NS_WEBUI, NVS_READWRITE, &wh) == ESP_OK) {
                 const system_mode_profile_t *pm = system_mode_manager_get_profile(mid);
@@ -1975,7 +1672,7 @@ static esp_err_t uri_network_apn_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = parse_http_json_body(body);
+    cJSON *root = cJSON_Parse(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2082,18 +1779,15 @@ static esp_err_t uri_wifi_ap_get(httpd_req_t *req)
 
 static esp_err_t uri_wifi_ap_post(httpd_req_t *req)
 {
-    size_t body_cap = 0;
-    char *body = http_recv_body_alloc(req, 1024, &body_cap);
+    char *body = http_recv_body(req, 1024);
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = parse_http_json_body_loopback_fixup(body, body_cap);
+    cJSON *root = cJSON_Parse(body);
+    free(body);
     if (!root) {
-        ESP_LOGW(TAG, "wifi/ap invalid json len=%u: %.200s", (unsigned)strlen(body), body);
-        free(body);
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
     }
-    free(body);
     wifi_config_t wcfg = {0};
     esp_wifi_get_config(WIFI_IF_AP, &wcfg);
 
@@ -2115,23 +1809,25 @@ static esp_err_t uri_wifi_ap_post(httpd_req_t *req)
     }
     wcfg.ap.max_connection = 8;
 
-    /* OPEN 必须无密码；WPA/WPA2/WPA3 需 8–63 字节，否则 esp_wifi_set_config 失败，热点仍为开放 */
-    if (wcfg.ap.authmode == WIFI_AUTH_OPEN) {
-        memset(wcfg.ap.password, 0, sizeof(wcfg.ap.password));
-    } else {
-        size_t plen = strlen((char *)wcfg.ap.password);
-        if (plen < 8 || plen > 63) {
-            cJSON_Delete(root);
-            return send_json(req, 400,
-                             "{\"status\":\"error\",\"message\":\"WPA 密码需 8–63 位。开启或改为加密时请重新输入密码并保存（页面为安全不显示已存密码）。\"}");
-        }
+    esp_err_t werr = esp_wifi_set_config(WIFI_IF_AP, &wcfg);
+    if (werr != ESP_OK) {
+        cJSON_Delete(root);
+        return send_json(req, 400, "{\"status\":\"error\",\"message\":\"wifi ap set failed\"}");
     }
 
-    if (softap_cfg_save_to_nvs(&wcfg) != ESP_OK) {
-        ESP_LOGW(TAG, "SoftAP NVS save failed");
-    }
-
+    /* Persist full SoftAP fields for boot restore (WIFI_STORAGE_RAM loses RAM config). */
     cJSON *extra = cJSON_CreateObject();
+    cJSON_AddStringToObject(extra, "ssid", (char *)wcfg.ap.ssid);
+    cJSON_AddStringToObject(extra, "password", (char *)wcfg.ap.password);
+    cJSON_AddStringToObject(extra, "encryption_mode", auth_to_enc_str(wcfg.ap.authmode));
+    cJSON_AddBoolToObject(extra, "hidden_ssid", wcfg.ap.ssid_hidden != 0);
+    if (wcfg.ap.channel) {
+        char chs[8];
+        snprintf(chs, sizeof(chs), "%d", wcfg.ap.channel);
+        cJSON_AddStringToObject(extra, "channel", chs);
+    } else {
+        cJSON_AddStringToObject(extra, "channel", "auto");
+    }
     cJSON *p = cJSON_GetObjectItem(root, "protocol");
     if (cJSON_IsString(p)) {
         cJSON_AddStringToObject(extra, "protocol", p->valuestring);
@@ -2139,10 +1835,6 @@ static esp_err_t uri_wifi_ap_post(httpd_req_t *req)
     p = cJSON_GetObjectItem(root, "bandwidth");
     if (cJSON_IsString(p)) {
         cJSON_AddStringToObject(extra, "bandwidth", p->valuestring);
-    }
-    p = cJSON_GetObjectItem(root, "channel");
-    if (cJSON_IsString(p)) {
-        cJSON_AddStringToObject(extra, "channel", p->valuestring);
     }
     p = cJSON_GetObjectItem(root, "signal_strength");
     if (cJSON_IsString(p)) {
@@ -2168,9 +1860,8 @@ static esp_err_t uri_wifi_ap_post(httpd_req_t *req)
         free(exs);
     }
     cJSON_Delete(root);
-    schedule_deferred_wifi_ap_set(&wcfg);
-    log_ring_fmt("[WIFI] SoftAP config scheduled (deferred)");
-    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"SoftAP 已排队应用，终端可能短暂断开后自动重连。\"}");
+    log_ring_fmt("[WIFI] SoftAP config updated");
+    return send_json(req, 200, "{\"status\":\"success\",\"hint\":\"SoftAP 参数已写入；部分终端可能需重连。\"}");
 }
 
 static esp_err_t uri_system_probes_get(httpd_req_t *req)
@@ -2213,7 +1904,7 @@ static esp_err_t uri_system_probes_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = parse_http_json_body(body);
+    cJSON *root = cJSON_Parse(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2284,7 +1975,7 @@ static esp_err_t uri_system_time_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = parse_http_json_body(body);
+    cJSON *root = cJSON_Parse(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2310,7 +2001,7 @@ static esp_err_t uri_system_sync_time_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = parse_http_json_body(body);
+    cJSON *root = cJSON_Parse(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2374,7 +2065,7 @@ static esp_err_t uri_system_reboot_schedule_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = parse_http_json_body(body);
+    cJSON *root = cJSON_Parse(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2439,7 +2130,7 @@ static esp_err_t uri_system_login_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = parse_http_json_body(body);
+    cJSON *root = cJSON_Parse(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2476,7 +2167,7 @@ static esp_err_t uri_system_password_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = parse_http_json_body(body);
+    cJSON *root = cJSON_Parse(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2572,7 +2263,7 @@ static esp_err_t uri_system_config_import_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = parse_http_json_body(body);
+    cJSON *root = cJSON_Parse(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
@@ -2669,7 +2360,7 @@ static esp_err_t uri_traffic_post(httpd_req_t *req)
     if (!body) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
-    cJSON *root = parse_http_json_body(body);
+    cJSON *root = cJSON_Parse(body);
     free(body);
     if (!root) {
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");

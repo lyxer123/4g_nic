@@ -7,6 +7,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include "driver/gpio.h"
+#include "esp_modem_c_api_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
@@ -17,8 +18,12 @@
 #include "esp_log.h"
 #include "esp_bridge.h"
 #include "esp_bridge_internal.h"
+#include "sdkconfig.h"
 
 #define MODULE_BOOT_TIME_MS     5000
+#ifndef CONFIG_ESP_MODEM_C_API_STR_MAX
+#define CONFIG_ESP_MODEM_C_API_STR_MAX 128
+#endif
 #if defined(CONFIG_BRIDGE_FLOW_CONTROL_NONE)
 #define BRIDGE_FLOW_CONTROL ESP_MODEM_FLOW_CONTROL_NONE
 #elif defined(CONFIG_BRIDGE_FLOW_CONTROL_SW)
@@ -58,6 +63,8 @@ static void modem_info_reset(esp_bridge_modem_info_t *info)
     snprintf(info->imsi, sizeof(info->imsi), "--");
     snprintf(info->iccid, sizeof(info->iccid), "--");
     snprintf(info->module_name, sizeof(info->module_name), "--");
+    snprintf(info->manufacturer, sizeof(info->manufacturer), "--");
+    snprintf(info->fw_version, sizeof(info->fw_version), "--");
 }
 
 static const char *act_to_mode(int act)
@@ -82,16 +89,16 @@ static const char *decode_cn_operator(const char *code)
         strncmp(code, "46004", 5) == 0 || strncmp(code, "46007", 5) == 0 ||
         strncmp(code, "46008", 5) == 0 || strncmp(code, "46013", 5) == 0 ||
         strncmp(code, "898600", 6) == 0 || strncmp(code, "898602", 6) == 0) {
-        return "中国移动";
+        return "\xe4\xb8\xad\xe5\x9b\xbd\xe7\xa7\xbb\xe5\x8a\xa8"; /* 中国移动 */
     }
     if (strncmp(code, "46001", 5) == 0 || strncmp(code, "46006", 5) == 0 ||
         strncmp(code, "46009", 5) == 0 || strncmp(code, "46010", 5) == 0 ||
         strncmp(code, "898601", 6) == 0) {
-        return "中国联通";
+        return "\xe4\xb8\xad\xe5\x9b\xbd\xe8\x81\x94\xe9\x80\x9a"; /* 中国联通 */
     }
     if (strncmp(code, "46003", 5) == 0 || strncmp(code, "46005", 5) == 0 ||
         strncmp(code, "46011", 5) == 0 || strncmp(code, "898603", 6) == 0) {
-        return "中国电信";
+        return "\xe4\xb8\xad\xe5\x9b\xbd\xe7\x94\xb5\xe4\xbf\xa1"; /* 中国电信 */
     }
     return NULL;
 }
@@ -112,31 +119,107 @@ static void try_fill_operator_from_sim(esp_bridge_modem_info_t *info)
         snprintf(info->operator_name, sizeof(info->operator_name), "%s", op);
     }
 }
+
 static esp_err_t iccid_line_cb(uint8_t *data, size_t len)
 {
     if (!data || len == 0) {
         return ESP_OK;
     }
-    int start = -1;
-    int end = -1;
-    for (size_t i = 0; i < len; i++) {
+    /* Prefer ICCID-like runs (18–22 digits); ignore short spurious numbers on a line. */
+    size_t best_len = 0;
+    size_t best_start = 0;
+    for (size_t i = 0; i < len; ) {
         if (data[i] >= '0' && data[i] <= '9') {
-            if (start < 0) {
-                start = (int)i;
+            size_t j = i;
+            while (j < len && data[j] >= '0' && data[j] <= '9') {
+                j++;
             }
-            end = (int)i;
-        } else if (start >= 0) {
-            break;
+            size_t run = j - i;
+            if (run >= 18 && run <= 22 && run > best_len) {
+                best_len = run;
+                best_start = i;
+            }
+            i = j;
+        } else {
+            i++;
         }
     }
-    if (start >= 0 && end >= start) {
-        int n = end - start + 1;
-        if (n > 0 && n < (int)sizeof(s_iccid_parse_buf)) {
-            memcpy(s_iccid_parse_buf, data + start, (size_t)n);
-            s_iccid_parse_buf[n] = '\0';
+    if (best_len == 0) {
+        int start = -1;
+        int end = -1;
+        for (size_t i = 0; i < len; i++) {
+            if (data[i] >= '0' && data[i] <= '9') {
+                if (start < 0) {
+                    start = (int)i;
+                }
+                end = (int)i;
+            } else if (start >= 0) {
+                break;
+            }
         }
+        if (start >= 0 && end >= start) {
+            best_len = (size_t)(end - start + 1);
+            best_start = (size_t)start;
+        }
+    }
+    if (best_len > 0 && best_len < sizeof(s_iccid_parse_buf)) {
+        memcpy(s_iccid_parse_buf, data + best_start, best_len);
+        s_iccid_parse_buf[best_len] = '\0';
     }
     return ESP_OK;
+}
+
+static void extract_iccid_from_text(const char *text, char *out, size_t out_sz)
+{
+    if (!text || !out || out_sz == 0) {
+        return;
+    }
+    out[0] = '\0';
+    size_t best_len = 0;
+    const char *best = NULL;
+    for (const char *p = text; *p; ) {
+        if (*p >= '0' && *p <= '9') {
+            const char *s = p;
+            size_t L = 0;
+            while (p[0] >= '0' && p[0] <= '9') {
+                L++;
+                p++;
+            }
+            if (L >= 18 && L <= 22 && L > best_len) {
+                best_len = L;
+                best = s;
+            }
+        } else {
+            p++;
+        }
+    }
+    if (best && best_len > 0) {
+        size_t cpy = best_len < out_sz - 1 ? best_len : out_sz - 1;
+        memcpy(out, best, cpy);
+        out[cpy] = '\0';
+    }
+}
+
+static void trim_at_response_line(char *s)
+{
+    if (!s) {
+        return;
+    }
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == '\r' || s[n - 1] == '\n' || s[n - 1] == ' ')) {
+        s[--n] = '\0';
+    }
+}
+
+static esp_err_t try_iccid_at(esp_modem_dce_t *dce, const char *cmd, char *out, size_t out_sz)
+{
+    char buf[CONFIG_ESP_MODEM_C_API_STR_MAX];
+    if (esp_modem_at(dce, cmd, buf, 4000) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    trim_at_response_line(buf);
+    extract_iccid_from_text(buf, out, out_sz);
+    return (out[0] != '\0') ? ESP_OK : ESP_FAIL;
 }
 
 static esp_err_t cops_line_cb(uint8_t *data, size_t len)
@@ -215,26 +298,71 @@ esp_err_t esp_bridge_modem_get_info(esp_bridge_modem_info_t *info)
         snprintf(info->module_name, sizeof(info->module_name), "%.*s",
                  (int)sizeof(info->module_name) - 1, buf);
     }
+    /* Manufacturer / revision: generic DCE does not always map these; ML307 supports standard AT+CGMI/AT+CGMR. */
+    {
+        char mb[CONFIG_ESP_MODEM_C_API_STR_MAX];
+        if (esp_modem_at(s_dce, "AT+CGMI", mb, 4000) == ESP_OK && mb[0] != '\0') {
+            trim_at_response_line(mb);
+            if (mb[0] != '\0') {
+                snprintf(info->manufacturer, sizeof(info->manufacturer), "%.*s",
+                         (int)sizeof(info->manufacturer) - 1, mb);
+            }
+        }
+        if (strcmp(info->manufacturer, "--") == 0 && esp_modem_at(s_dce, "ATI", mb, 4000) == ESP_OK && mb[0] != '\0') {
+            trim_at_response_line(mb);
+            if (mb[0] != '\0') {
+                snprintf(info->manufacturer, sizeof(info->manufacturer), "%.*s",
+                         (int)sizeof(info->manufacturer) - 1, mb);
+            }
+        }
+        if (esp_modem_at(s_dce, "AT+CGMR", mb, 4000) == ESP_OK && mb[0] != '\0') {
+            trim_at_response_line(mb);
+            if (mb[0] != '\0') {
+                snprintf(info->fw_version, sizeof(info->fw_version), "%.*s",
+                         (int)sizeof(info->fw_version) - 1, mb);
+            }
+        }
+        if (strcmp(info->fw_version, "--") == 0 && esp_modem_at(s_dce, "AT+GMR", mb, 4000) == ESP_OK && mb[0] != '\0') {
+            trim_at_response_line(mb);
+            if (mb[0] != '\0') {
+                snprintf(info->fw_version, sizeof(info->fw_version), "%.*s",
+                         (int)sizeof(info->fw_version) - 1, mb);
+            }
+        }
+    }
     int rssi = 99, ber = 99;
     if (esp_modem_get_signal_quality(s_dce, &rssi, &ber) == ESP_OK) {
         info->rssi = rssi;
         info->ber = ber;
     }
-    memset(s_iccid_parse_buf, 0, sizeof(s_iccid_parse_buf));
-    if (esp_modem_command(s_dce, "AT+ICCID", iccid_line_cb, 1500) != ESP_OK || s_iccid_parse_buf[0] == '\0') {
+    /* ICCID: esp_modem_at() appends \\r; esp_modem_command() does not — must use \\r in the string. */
+    if (try_iccid_at(s_dce, "AT+MCCID", info->iccid, sizeof(info->iccid)) != ESP_OK &&
+        try_iccid_at(s_dce, "AT+MCCID?", info->iccid, sizeof(info->iccid)) != ESP_OK &&
+        try_iccid_at(s_dce, "AT+ICCID", info->iccid, sizeof(info->iccid)) != ESP_OK &&
+        try_iccid_at(s_dce, "AT+CCID", info->iccid, sizeof(info->iccid)) != ESP_OK &&
+        try_iccid_at(s_dce, "AT+QCCID", info->iccid, sizeof(info->iccid)) != ESP_OK) {
         memset(s_iccid_parse_buf, 0, sizeof(s_iccid_parse_buf));
-        (void)esp_modem_command(s_dce, "AT+CCID", iccid_line_cb, 1500);
-    }
-    if (s_iccid_parse_buf[0] == '\0') {
-        memset(s_iccid_parse_buf, 0, sizeof(s_iccid_parse_buf));
-        (void)esp_modem_command(s_dce, "AT+QCCID", iccid_line_cb, 1500);
-    }
-    if (s_iccid_parse_buf[0] != '\0') {
-        snprintf(info->iccid, sizeof(info->iccid), "%.*s", (int)sizeof(info->iccid) - 1, s_iccid_parse_buf);
+        if (esp_modem_command(s_dce, "AT+MCCID\r", iccid_line_cb, 4000) != ESP_OK || s_iccid_parse_buf[0] == '\0') {
+            memset(s_iccid_parse_buf, 0, sizeof(s_iccid_parse_buf));
+            if (esp_modem_command(s_dce, "AT+MCCID?\r", iccid_line_cb, 4000) != ESP_OK || s_iccid_parse_buf[0] == '\0') {
+                memset(s_iccid_parse_buf, 0, sizeof(s_iccid_parse_buf));
+                if (esp_modem_command(s_dce, "AT+ICCID\r", iccid_line_cb, 4000) != ESP_OK || s_iccid_parse_buf[0] == '\0') {
+                    memset(s_iccid_parse_buf, 0, sizeof(s_iccid_parse_buf));
+                    (void)esp_modem_command(s_dce, "AT+CCID\r", iccid_line_cb, 4000);
+                }
+            }
+        }
+        if (s_iccid_parse_buf[0] == '\0') {
+            memset(s_iccid_parse_buf, 0, sizeof(s_iccid_parse_buf));
+            (void)esp_modem_command(s_dce, "AT+QCCID\r", iccid_line_cb, 4000);
+        }
+        if (s_iccid_parse_buf[0] != '\0') {
+            snprintf(info->iccid, sizeof(info->iccid), "%.*s", (int)sizeof(info->iccid) - 1, s_iccid_parse_buf);
+        }
     }
     if (strcmp(info->network_mode, "--") == 0) {
         s_cops_act = -1;
-        if (esp_modem_command(s_dce, "AT+COPS?", cops_line_cb, 1500) == ESP_OK && s_cops_act >= 0) {
+        if (esp_modem_command(s_dce, "AT+COPS?\r", cops_line_cb, 4000) == ESP_OK && s_cops_act >= 0) {
             snprintf(info->network_mode, sizeof(info->network_mode), "%s", act_to_mode(s_cops_act));
             info->act = s_cops_act;
         }
@@ -320,7 +448,7 @@ esp_netif_t *esp_bridge_create_modem_netif(esp_netif_ip_info_t *custom_ip_info, 
     };
     gpio_config(&io_config);
     gpio_set_level(CONFIG_MODEM_RESET_GPIO, 0);
-    vTaskDelay(pdMS_TO_TICKS(1500));
+    vTaskDelay(pdMS_TO_TICKS(1000));
     gpio_set_level(CONFIG_MODEM_RESET_GPIO, 1);
 
     vTaskDelay(pdMS_TO_TICKS(MODULE_BOOT_TIME_MS));
@@ -380,7 +508,11 @@ esp_netif_t *esp_bridge_create_modem_netif(esp_netif_ip_info_t *custom_ip_info, 
     struct esp_modem_usb_term_config usb_config = ESP_MODEM_DEFAULT_USB_CONFIG(CONFIG_BRIDGE_MODEM_USB_VID, CONFIG_BRIDGE_MODEM_USB_PID, CONFIG_BRIDGE_MODEM_USB_INTERFACE_NUMBER); // VID, PID and interface num of 4G modem
     const esp_modem_dte_config_t dte_usb_config = ESP_MODEM_DTE_DEFAULT_USB_CONFIG(usb_config);
     ESP_LOGI(TAG, "Waiting for USB device connection...");
-    esp_modem_dce_t *dce = esp_modem_new_dev_usb(ESP_MODEM_DCE_BG96, &dte_usb_config, &dce_config, esp_netif);
+    //esp_modem_dce_t *dce = esp_modem_new_dev_usb(ESP_MODEM_DCE_BG96, &dte_usb_config, &dce_config, esp_netif);
+    
+    esp_modem_dce_t *dce = esp_modem_new_dev_usb(ESP_MODEM_DCE_GENETIC, &dte_usb_config, &dce_config, esp_netif);
+    
+    
     assert(dce);
     esp_modem_set_error_cb(dce, usb_terminal_error_handler);
     vTaskDelay(pdMS_TO_TICKS(2000)); // Although the DTE should be ready after USB enumeration, sometimes it fails to respond without this delay
@@ -404,9 +536,19 @@ esp_netif_t *esp_bridge_create_modem_netif(esp_netif_ip_info_t *custom_ip_info, 
 #endif
 
     int rssi, ber;
-    esp_err_t err = esp_modem_get_signal_quality(dce, &rssi, &ber);
+    esp_err_t err;
+    int retry = 3;
+    while (retry-- > 0) {
+        err = esp_modem_get_signal_quality(dce, &rssi, &ber);
+        if (err == ESP_OK) {
+            break;
+        }
+        ESP_LOGE(TAG, "esp_modem_get_signal_quality failed with %d %s, retrying... (%d attempts left)", err, esp_err_to_name(err), retry);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_modem_get_signal_quality failed with %d %s", err, esp_err_to_name(err));
+        ESP_LOGE(TAG, "esp_modem_get_signal_quality failed after 3 attempts with %d %s", err, esp_err_to_name(err));
         esp_modem_destroy(dce);
         esp_netif_destroy(esp_netif);
         vEventGroupDelete(event_group);

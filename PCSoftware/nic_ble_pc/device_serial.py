@@ -222,6 +222,23 @@ class SerialMux:
         self._log_pcapi_result(st, data)
         return st, data
 
+    def send_raw_line(self, line: str) -> None:
+        """
+        Send one line to the device (e.g. serial_cli: help, modem_info, AT...).
+        Uses the same lock as PCAPI to avoid interleaved writes. Response lines
+        appear in the mux log as usual.
+        """
+        if not self.is_open or self._ser is None:
+            raise SerialApiError("串口未连接")
+        s = line.strip()
+        if not s:
+            raise SerialApiError("命令为空")
+        payload = (s + "\r\n").encode("utf-8")
+        with self._send_lock:
+            self._ser.write(payload)
+            self._ser.flush()
+        self._log_line(f"[发送 →] {s}")
+
 
 class SerialApiClient:
     """Same call pattern as WebApiClient: get / post_json / delete → parsed JSON."""
