@@ -1,4 +1,7 @@
-"""Windows PC-side network cycling for stability tests (Ethernet / Wi‑Fi). Requires admin rights for netsh."""
+"""Windows PC-side network cycling for stability tests (Ethernet / Wi‑Fi). Requires admin rights for netsh.
+
+稳定性测试会话内会通过 powercfg 将「已接通电源」下的关闭显示器与睡眠设为从不，结束后恢复为固定分钟数。
+"""
 
 from __future__ import annotations
 
@@ -64,6 +67,91 @@ def run_cmd(
         return -1, f"timeout: {e}"
     except OSError as e:
         return -1, str(e)
+
+
+# 稳定性测试结束后恢复的「已接通电源」计时（分钟）
+STABILITY_RESTORE_MONITOR_MIN = 10
+STABILITY_RESTORE_STANDBY_MIN = 10
+
+_power_stab_lock = threading.Lock()
+_power_stab_sessions = 0
+
+
+def windows_set_ac_display_sleep_timeout_minutes(monitor_min: int, standby_min: int) -> Tuple[bool, str]:
+    """
+    设置当前电源方案下「已接通电源」的关闭显示器与睡眠超时（分钟）。
+    monitor_min / standby_min 为 0 表示「从不」。
+    """
+    if not IS_WINDOWS:
+        return False, "not windows"
+    c1, o1 = run_cmd(
+        ["powercfg", "/change", "monitor-timeout-ac", str(monitor_min)],
+        timeout_s=25.0,
+        oem_console=True,
+    )
+    c2, o2 = run_cmd(
+        ["powercfg", "/change", "standby-timeout-ac", str(standby_min)],
+        timeout_s=25.0,
+        oem_console=True,
+    )
+    ok = c1 == 0 and c2 == 0
+    parts = [f"monitor-timeout-ac={monitor_min} rc={c1}", f"standby-timeout-ac={standby_min} rc={c2}"]
+    if o1:
+        parts.append(o1[:160])
+    if o2:
+        parts.append(o2[:160])
+    return ok, " | ".join(parts)
+
+
+def stability_test_power_session_enter(log: Optional[LogFn] = None) -> None:
+    """开始一路稳定性测试：首路会话时将 AC 下显示器与睡眠设为从不。"""
+    global _power_stab_sessions
+    if not IS_WINDOWS:
+        return
+    with _power_stab_lock:
+        _power_stab_sessions += 1
+        if _power_stab_sessions > 1:
+            if log:
+                log(
+                    f"[电源] 多路稳定性测试并行（当前 {_power_stab_sessions} 路），"
+                    "已保持接通电源下关闭显示器/睡眠「从不」"
+                )
+            return
+        ok, msg = windows_set_ac_display_sleep_timeout_minutes(0, 0)
+        if log:
+            log(
+                f"[电源] 已接通电源：关闭显示器与睡眠已设为「从不」 "
+                f"({'OK' if ok else 'FAIL'}) {msg[:320]}"
+            )
+
+
+def stability_test_power_session_leave(log: Optional[LogFn] = None) -> None:
+    """结束一路稳定性测试：所有路均结束时将 AC 下两项恢复为 STABILITY_RESTORE_* 分钟。"""
+    global _power_stab_sessions
+    if not IS_WINDOWS:
+        return
+    with _power_stab_lock:
+        if _power_stab_sessions <= 0:
+            _power_stab_sessions = 0
+            return
+        _power_stab_sessions -= 1
+        if _power_stab_sessions > 0:
+            if log:
+                log(
+                    f"[电源] 仍有 {_power_stab_sessions} 路稳定性测试在运行，"
+                    "暂不恢复电源计时"
+                )
+            return
+        ok, msg = windows_set_ac_display_sleep_timeout_minutes(
+            STABILITY_RESTORE_MONITOR_MIN,
+            STABILITY_RESTORE_STANDBY_MIN,
+        )
+        if log:
+            log(
+                f"[电源] 已接通电源：关闭显示器与睡眠已恢复为 "
+                f"{STABILITY_RESTORE_MONITOR_MIN} 分钟 "
+                f"({'OK' if ok else 'FAIL'}) {msg[:320]}"
+            )
 
 
 def powershell_json(command: str, timeout_s: float = 30.0) -> Tuple[int, str]:
@@ -138,7 +226,7 @@ def _wlan_profile_xml_wpa2(ssid: str, passphrase: str) -> str:
     </SSID>
   </SSIDConfig>
   <connectionType>ESS</connectionType>
-  <connectionMode>manual</connectionMode>
+  <connectionMode>auto</connectionMode>
   <MSM>
     <security>
       <authEncryption>
@@ -168,7 +256,7 @@ def _wlan_profile_xml_open(ssid: str) -> str:
     </SSID>
   </SSIDConfig>
   <connectionType>ESS</connectionType>
-  <connectionMode>manual</connectionMode>
+  <connectionMode>auto</connectionMode>
   <MSM>
     <security>
       <authEncryption>
@@ -193,6 +281,257 @@ def wlan_disconnect(interface_name: str) -> Tuple[int, str]:
     )
 
 
+def list_wlan_profile_names_on_interface(interface_name: str) -> List[str]:
+    """列出指定无线接口上的已保存配置文件名称（中英文 netsh 输出）。"""
+    if not IS_WINDOWS or not interface_name.strip():
+        return []
+    code, out = run_cmd(
+        ["netsh", "wlan", "show", "profiles", f"interface={interface_name.strip()}"],
+        timeout_s=30.0,
+        oem_console=True,
+    )
+    if code != 0 or not out:
+        return []
+    names: List[str] = []
+    for line in out.splitlines():
+        if ":" not in line:
+            continue
+        left, right = line.split(":", 1)
+        left_l = left.strip().lower()
+        right = right.strip()
+        if not right or right == "<None>":
+            continue
+        if "profile" in left_l or "配置文件" in left:
+            names.append(right)
+    return names
+
+
+def wlan_set_other_profiles_manual(interface_name: str, except_ssid: str) -> int:
+    """
+    将除 except_ssid 外的已存 Wi‑Fi 配置设为「手动连接」，避免启用网卡后 Windows 自动连到其它记住的热点。
+    返回已改为手动的配置数量。
+    """
+    iface = interface_name.strip()
+    ex = except_ssid.strip()
+    if not iface or not ex:
+        return 0
+    n = 0
+    for pname in list_wlan_profile_names_on_interface(iface):
+        if pname.casefold() == ex.casefold():
+            continue
+        code, _ = run_cmd(
+            [
+                "netsh",
+                "wlan",
+                "set",
+                "profileparameter",
+                f"name={pname}",
+                "connectionmode=manual",
+                f"interface={iface}",
+            ],
+            timeout_s=25.0,
+            oem_console=True,
+        )
+        if code == 0:
+            n += 1
+    return n
+
+
+def wlan_set_other_profiles_manual_all_adapters(except_ssid: str) -> int:
+    """
+    在本机所有无线接口上，将除目标 SSID 外的已保存配置设为手动连接。
+    避免仅处理测试网卡时，其它无线接口（或虚拟适配器）上仍自动连到非 ESP32 热点。
+    """
+    ex = except_ssid.strip()
+    if not ex:
+        return 0
+    total = 0
+    for iface in list_net_adapter_names("wifi"):
+        total += wlan_set_other_profiles_manual(iface, ex)
+    return total
+
+
+def wlan_restore_all_profiles_auto(interface_name: str) -> int:
+    """测试结束后将本接口上所有已存配置恢复为自动连接。返回成功设置的数量。"""
+    iface = interface_name.strip()
+    if not iface:
+        return 0
+    n = 0
+    for pname in list_wlan_profile_names_on_interface(iface):
+        code, _ = run_cmd(
+            [
+                "netsh",
+                "wlan",
+                "set",
+                "profileparameter",
+                f"name={pname}",
+                "connectionmode=auto",
+                f"interface={iface}",
+            ],
+            timeout_s=25.0,
+            oem_console=True,
+        )
+        if code == 0:
+            n += 1
+    return n
+
+
+def wlan_restore_all_profiles_auto_all_adapters() -> int:
+    """将本机所有无线接口上的已存配置恢复为自动连接（测试结束用）。"""
+    total = 0
+    for iface in list_net_adapter_names("wifi"):
+        total += wlan_restore_all_profiles_auto(iface)
+    return total
+
+
+def wlan_wifi_test_apply_profile_policy(test_adapter: str, target_ssid: str, log: LogFn) -> None:
+    """
+    Wi‑Fi 稳定性测试开始时：禁止所有已保存热点的自动连接（除目标 SSID），
+    并确保目标 SSID 在测试无线网卡上为自动连接。
+    """
+    ta = test_adapter.strip()
+    ssid = target_ssid.strip()
+    if not ta or not ssid:
+        return
+    n_man = wlan_set_other_profiles_manual_all_adapters(ssid)
+    wlan_ensure_target_profile_auto(ta, ssid)
+    log(
+        f"[Wi‑Fi] 测试策略：已在所有无线接口上将非 {ssid!r} 的配置设为手动连接"
+        f"（成功 {n_man} 项），目标热点在 {ta} 上为自动连接"
+    )
+
+
+def wlan_ensure_target_profile_auto(interface_name: str, ssid: str) -> None:
+    """将目标 SSID 的配置设为自动连接，避免 manual 配置在关联后立刻掉线。"""
+    iface = interface_name.strip()
+    s = ssid.strip()
+    if not iface or not s:
+        return
+    run_cmd(
+        [
+            "netsh",
+            "wlan",
+            "set",
+            "profileparameter",
+            f"name={s}",
+            "connectionmode=auto",
+            f"interface={iface}",
+        ],
+        timeout_s=20.0,
+        oem_console=True,
+    )
+
+
+def wlan_get_interface_state(interface_name: str) -> Optional[str]:
+    """当前接口 netsh 中的 State（如 connected / disconnected）。"""
+    if not IS_WINDOWS or not interface_name.strip():
+        return None
+    code, out = run_cmd(
+        ["netsh", "wlan", "show", "interfaces"],
+        timeout_s=25.0,
+        oem_console=True,
+    )
+    if code != 0 or not out:
+        return None
+    want = interface_name.strip().casefold()
+    iface_block: Optional[str] = None
+    for line in out.splitlines():
+        ls = line.strip()
+        low = ls.lower()
+        if ":" in line and (
+            low.startswith("name")
+            or ls.startswith("名称")
+            or ("名称" in ls[:12] and ":" in ls)
+        ):
+            iface_block = ls.split(":", 1)[1].strip().casefold()
+            continue
+        if iface_block == want and (low.startswith("state") or ls.startswith("状态")) and ":" in ls:
+            return ls.split(":", 1)[1].strip()
+    return None
+
+
+def wlan_has_usable_ipv4(interface_name: str) -> bool:
+    """接口上是否存在非 APIPA 的 IPv4（DHCP 已下发）。"""
+    if not IS_WINDOWS or not interface_name.strip():
+        return False
+    ia = interface_name.strip().replace("'", "''")
+    ps = (
+        f"$x = @(Get-NetIPAddress -InterfaceAlias '{ia}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.IPAddress -notlike '169.254.*' }); "
+        "if ($x.Count -gt 0) { '1' } else { '0' }"
+    )
+    code, out = powershell_json(ps, timeout_s=22.0)
+    if code != 0:
+        return False
+    return out.strip() == "1"
+
+
+def wlan_wait_until_ready(
+    interface_name: str,
+    ssid: str,
+    stop: threading.Event,
+    log: LogFn,
+    tag: str,
+    timeout_s: float = 60.0,
+) -> Tuple[bool, str]:
+    """
+    等待关联到目标 SSID、State 为已连接且拿到非 APIPA 的 IPv4。
+    解决：netsh connect 已成功但 DHCP 未完成或 manual 配置导致随后掉线，进入检测阶段时「媒体已断开」。
+    """
+    t0 = time.monotonic()
+    target = ssid.strip().casefold()
+    last_detail = ""
+    next_log = t0
+    while time.monotonic() - t0 < timeout_s:
+        if stop.is_set():
+            return False, "stopped"
+        cur = wlan_get_connected_ssid(interface_name)
+        st = wlan_get_interface_state(interface_name)
+        st_l = (st or "").lower()
+        ip_ok = wlan_has_usable_ipv4(interface_name)
+        last_detail = f"ssid={cur!r} state={st!r} ipv4={ip_ok}"
+        ssid_ok = cur is not None and cur.casefold() == target
+        state_ok = (st is None) or ("connected" in st_l) or ("已连接" in (st or ""))
+        if ssid_ok and ip_ok and state_ok:
+            return True, last_detail
+        now = time.monotonic()
+        if now >= next_log:
+            log(f"{tag} 等待链路/DHCP… {last_detail}")
+            next_log = now + 8.0
+        time.sleep(0.45)
+    return False, f"超时 {timeout_s:g}s: {last_detail}"
+
+
+def wlan_get_connected_ssid(interface_name: str) -> Optional[str]:
+    """当前接口已关联的 SSID（show interfaces）。"""
+    if not IS_WINDOWS or not interface_name.strip():
+        return None
+    code, out = run_cmd(
+        ["netsh", "wlan", "show", "interfaces"],
+        timeout_s=25.0,
+        oem_console=True,
+    )
+    if code != 0 or not out:
+        return None
+    want = interface_name.strip().casefold()
+    iface_block: Optional[str] = None
+    for line in out.splitlines():
+        ls = line.strip()
+        low = ls.lower()
+        if ":" in line and (
+            low.startswith("name")
+            or ls.startswith("名称")
+            or ("名称" in ls[:12] and ":" in ls)
+        ):
+            iface_block = ls.split(":", 1)[1].strip().casefold()
+            continue
+        if iface_block == want and ls.lower().startswith("ssid") and ":" in line:
+            v = ls.split(":", 1)[1].strip()
+            if v and v.lower() not in ("none", "n/a", ""):
+                return v
+    return None
+
+
 def wlan_show_networks_brief() -> str:
     """扫描可见 SSID（用于日志；节选避免过长）。"""
     code, out = run_cmd(
@@ -205,10 +544,17 @@ def wlan_show_networks_brief() -> str:
     return out[:2000]
 
 
-def wlan_connect(ssid: str, password: str, interface_name: str) -> Tuple[bool, str]:
+def wlan_connect(
+    ssid: str,
+    password: str,
+    interface_name: str,
+    *,
+    policy_all_adapters: bool = True,
+) -> Tuple[bool, str]:
     """
     Connect to WLAN. `netsh wlan connect` does NOT accept key=; we add a temporary WPA2 profile via XML.
     Profile must be added **on the same interface** as connect;先 disconnect 再扫描再连。
+    policy_all_adapters=False：仅在本机指定网卡上把其它配置改为手动（用于 STA 保存前校验，减少全局改动）。
     """
     if not IS_WINDOWS or not ssid.strip():
         return False, "invalid ssid"
@@ -217,17 +563,47 @@ def wlan_connect(ssid: str, password: str, interface_name: str) -> Tuple[bool, s
         return False, "需要指定无线网卡名称（与「网络连接」中名称一致）"
     lines: List[str] = []
 
-    # 0) 断开当前连接，避免连到其它已保存热点
+    # 0) 断开，并把其它已存配置改为「手动」，防止启用网卡后自动连到非测试热点
     dcode, dout = wlan_disconnect(iface)
     lines.append(f"disconnect: exit={dcode} {dout[:120] if dout else ''}".strip())
+    if policy_all_adapters:
+        nman = wlan_set_other_profiles_manual_all_adapters(ssid)
+        if nman:
+            lines.append(
+                f"已在所有无线接口上将其它 {nman} 个 Wi‑Fi 配置设为手动连接（目标 {ssid!r} 可自动/显式连接）"
+            )
+    else:
+        nman = wlan_set_other_profiles_manual(iface, ssid)
+        if nman:
+            lines.append(
+                f"已在本网卡上将其它 {nman} 个 Wi‑Fi 配置设为手动连接（目标 {ssid!r}）"
+            )
     time.sleep(1.0)
+
+    def _verify_ssid_ok() -> bool:
+        target = ssid.strip().casefold()
+        for attempt in range(4):
+            if attempt:
+                time.sleep(0.55)
+            cur = wlan_get_connected_ssid(iface)
+            if cur is None:
+                continue
+            if cur.casefold() == target:
+                return True
+            lines.append(f"(SSID 校验: 当前已连 {cur!r}，目标 {ssid!r} — 不匹配)")
+            return False
+        return True
 
     # 1) 尝试用已有配置文件连接（仅 name + interface，避免 ssid 重复参数问题）
     args_try = ["netsh", "wlan", "connect", f"name={ssid}", f"interface={iface}"]
     code0, out0 = run_cmd(args_try, timeout_s=25.0, oem_console=True)
-    if code0 == 0:
+    if code0 == 0 and _verify_ssid_ok():
+        wlan_ensure_target_profile_auto(iface, ssid)
         return True, "\n".join(lines) + "\n" + (out0 or "connected (existing profile)")
-    lines.append(f"(已有配置连接失败) {out0[:280]}")
+    if code0 == 0:
+        lines.append("(已有配置 connect 返回成功但 SSID 非目标，将重新导入 XML)")
+    else:
+        lines.append(f"(已有配置连接失败) {out0[:280]}")
 
     # 2) 删除该接口上的同名配置后重新导入 XML（UTF-8 BOM）
     xml_body = _wlan_profile_xml_open(ssid) if not password.strip() else _wlan_profile_xml_wpa2(ssid, password)
@@ -268,12 +644,40 @@ def wlan_connect(ssid: str, password: str, interface_name: str) -> Tuple[bool, s
         args2 = ["netsh", "wlan", "connect", f"name={ssid}", f"interface={iface}"]
         code2, out2 = run_cmd(args2, timeout_s=45.0, oem_console=True)
         lines.append(f"connect: {out2[:700]}")
-        return code2 == 0, "\n".join(lines)
+        ok2 = code2 == 0 and _verify_ssid_ok()
+        if ok2:
+            wlan_ensure_target_profile_auto(iface, ssid)
+        return ok2, "\n".join(lines)
     finally:
         try:
             os.unlink(path)
         except OSError:
             pass
+
+
+def wlan_validate_sta_before_device_save(
+    ssid: str,
+    password: str,
+    interface_name: str,
+) -> Tuple[bool, str]:
+    """
+    将 STA 写入设备前：在本机指定无线网卡上连接该 SSID/密码，并等待关联与 DHCP。
+    使用 policy_all_adapters=False，仅改动该网卡上的其它配置为手动，避免与稳定性测试同级的全局策略。
+    """
+    if not IS_WINDOWS:
+        return False, "not windows"
+    ok, msg = wlan_connect(ssid, password, interface_name, policy_all_adapters=False)
+    if not ok:
+        return False, msg
+    stop = threading.Event()
+
+    def _noop(_s: str) -> None:
+        pass
+
+    ready, rmsg = wlan_wait_until_ready(interface_name, ssid, stop, _noop, "[STA校验]", timeout_s=75.0)
+    if not ready:
+        return False, f"已尝试连接但链路/DHCP 未就绪：{rmsg}\n\n{msg[:2500]}"
+    return True, f"{msg}\nSTA 本机校验：{rmsg}"
 
 
 def ping_once(host: str, timeout_ms: int = 3000) -> Tuple[bool, str]:
@@ -561,9 +965,22 @@ def _one_wifi_cycle(
     log(f"[Wi‑Fi] 启用 {cfg.adapter} （A={a:g}s）…")
     ok2, msg2 = set_interface_admin(cfg.adapter, True)
     log(f"[Wi‑Fi] 启用结果: {'OK' if ok2 else 'FAIL'} {msg2[:300]}")
+    # wlan_connect 内会 disconnect，并在所有无线接口上将非目标配置改为手动、保证目标为自动连接
+    time.sleep(0.4)
     log(f"[Wi‑Fi] 连接热点 {ssid!r} …")
     wok, wmsg = wlan_connect(ssid, password, cfg.adapter)
     log(f"[Wi‑Fi] 连接结果: {'OK' if wok else 'FAIL'} {wmsg[:1200]}")
+    if wok:
+        ready, rmsg = wlan_wait_until_ready(cfg.adapter, ssid, stop, log, "[Wi‑Fi]", timeout_s=60.0)
+        log(f"[Wi‑Fi] 链路/DHCP 就绪: {'OK' if ready else 'FAIL'} {rmsg}")
+        if not ready:
+            log("[Wi‑Fi] 重试连接一次…")
+            wok2, wmsg2 = wlan_connect(ssid, password, cfg.adapter)
+            log(f"[Wi‑Fi] 重试连接: {'OK' if wok2 else 'FAIL'} {wmsg2[:800]}")
+            if wok2:
+                ready, rmsg = wlan_wait_until_ready(cfg.adapter, ssid, stop, log, "[Wi‑Fi]", timeout_s=45.0)
+                log(f"[Wi‑Fi] 重试后链路/DHCP: {'OK' if ready else 'FAIL'} {rmsg}")
+            wok = bool(wok2 and ready)
     if not wok:
         log(
             "[Wi‑Fi] 若热点使用 WPA2 密码，请在上方填写正确密码；开放热点请留空密码。"
@@ -637,6 +1054,7 @@ def run_wifi_loop(
                 )
             else:
                 log("[Wi‑Fi] 未找到有线网卡或禁用失败（若 ping 仍通，可能仍走其它出口）")
+        wlan_wifi_test_apply_profile_policy(cfg.adapter, ssid, log)
         n = 0
         while not stop.is_set():
             n += 1
@@ -650,4 +1068,7 @@ def run_wifi_loop(
             set_interface_admin(ename, True)
         if disabled_eth:
             log(f"[Wi‑Fi] 已恢复有线网卡: {', '.join(disabled_eth)}")
+        nauto = wlan_restore_all_profiles_auto_all_adapters()
+        if nauto:
+            log(f"[Wi‑Fi] 已在所有无线接口上恢复 {nauto} 个 Wi‑Fi 配置为自动连接（测试结束）")
         done()

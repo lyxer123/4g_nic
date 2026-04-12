@@ -299,11 +299,7 @@ def run() -> None:
     menubar = tk.Menu(root)
     root.config(menu=menubar)
 
-    menubar.add_command(label="连接设置…", command=show_connection_dialog)
-
-    m_stab = tk.Menu(menubar, tearoff=0)
-    menubar.add_cascade(label="稳定性测试", menu=m_stab)
-    m_stab.add_command(label="PC 网络稳定性", command=lambda: nav("stability"))
+    menubar.add_command(label="连接设置", command=show_connection_dialog)
 
     m_status = tk.Menu(menubar, tearoff=0)
     menubar.add_cascade(label="状态", menu=m_status)
@@ -311,16 +307,21 @@ def run() -> None:
     menubar.add_cascade(label="网络配置", menu=m_net)
     m_sys = tk.Menu(menubar, tearoff=0)
     menubar.add_cascade(label="系统管理", menu=m_sys)
+    m_stab = tk.Menu(menubar, tearoff=0)
+    menubar.add_cascade(label="稳定性测试", menu=m_stab)
+    m_stab.add_command(label="PC 网络稳定性", command=lambda: nav("stability"))
 
     i_status = menubar.index("状态")
     i_net = menubar.index("网络配置")
     i_sys = menubar.index("系统管理")
+    i_stab = menubar.index("稳定性测试")
 
     def set_admin_menus_enabled(en: bool) -> None:
         st = tk.NORMAL if en else tk.DISABLED
         menubar.entryconfigure(i_status, state=st)
         menubar.entryconfigure(i_net, state=st)
         menubar.entryconfigure(i_sys, state=st)
+        menubar.entryconfigure(i_stab, state=st)
 
     menu_enable_ref["set_admin_menus"] = set_admin_menus_enabled
     set_admin_menus_enabled(connected["v"])

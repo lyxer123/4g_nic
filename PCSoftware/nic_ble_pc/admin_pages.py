@@ -15,6 +15,18 @@ from typing import Any, Callable, Dict, List, Optional, TextIO, Tuple
 
 from .device_serial import SerialApiClient, SerialApiError
 
+
+def _app_base_dir() -> Path:
+    """与稳定性测试自动 log 一致：可执行目录或源码上级（含 logs/）。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def _local_network_config_path() -> Path:
+    return _app_base_dir() / "logs" / "network_config_local.json"
+
+
 # Paths match webPage/js/app.js API
 P_DASH = "/api/dashboard/overview"
 P_USERS = "/api/users/online"
@@ -45,6 +57,76 @@ WAN_TYPE_LABEL = {
     2: "WiFi 连上级路由（WAN）",
     3: "有线网络连上级路由（WAN）",
 }
+
+
+def _stab_resolve_current_mode_row(mode_json: dict) -> Optional[dict]:
+    """从 /api/mode 响应中解析当前生效的模式条目（modes 中 id 与 current 一致）。"""
+    cur: Optional[int] = None
+    rs = mode_json.get("runtime_status")
+    if isinstance(rs, dict) and rs.get("current_mode") is not None:
+        cur = int(rs["current_mode"])
+    if cur is None and mode_json.get("current") is not None:
+        cur = int(mode_json["current"])
+    if cur is None:
+        return None
+    modes = mode_json.get("modes") or []
+    for m in modes:
+        if int(m.get("id", -1)) == cur:
+            return m
+    return None
+
+
+def stab_mode_lan_flags(mode_json: dict) -> Tuple[Optional[bool], Optional[bool]]:
+    """
+    当前工作模式是否包含以太网 LAN / SoftAP（Wi‑Fi）LAN。
+    返回 (lan_eth, lan_softap)；无法解析时为 (None, None)（UI 可视为「先显示全部」）。
+    """
+    row = _stab_resolve_current_mode_row(mode_json)
+    if not row:
+        return None, None
+    return bool(row.get("lan_eth")), bool(row.get("lan_softap"))
+
+
+def format_stability_mode_hint(mode_json: dict) -> str:
+    """
+    根据 /api/mode 响应，提示当前固件工作模式与（1）以太网 /（2）Wi‑Fi 稳定性测试的对应关系。
+    适用于 W5500↔Wi‑Fi 各类组合：由 modes[].lan_eth / lan_softap 判断 PC 应接网线还是连热点。
+    """
+    cur: Optional[int] = None
+    rs = mode_json.get("runtime_status")
+    if isinstance(rs, dict) and rs.get("current_mode") is not None:
+        cur = int(rs["current_mode"])
+    if cur is None and mode_json.get("current") is not None:
+        cur = int(mode_json["current"])
+    if cur is None:
+        return "设备模式：响应中无 current_mode / current"
+    row = _stab_resolve_current_mode_row(mode_json)
+    if not row:
+        return f"设备模式：id={cur}（modes 中未找到该 id）"
+    label = str(row.get("label") or f"模式 {cur}")
+    le = bool(row.get("lan_eth"))
+    ls = bool(row.get("lan_softap"))
+    wt = row.get("wan_type")
+    try:
+        wt_s = WAN_TYPE_LABEL.get(int(wt), f"WAN类型={wt}") if wt is not None else ""
+    except (TypeError, ValueError):
+        wt_s = ""
+    head = f"当前：{label}"
+    if wt_s:
+        head += f"  ·  上行：{wt_s}"
+    head += f"  ·  LAN：有线={'开' if le else '关'}；SoftAP={'开' if ls else '关'}。"
+    if le and ls:
+        tail = (
+            "兼容性：（1）PC 网线接设备 ETH_LAN 做有线测试；（2）PC 无线连设备 SoftAP 做 Wi‑Fi 测试。"
+            "二者勿同时运行；取证 LAN 网关常见 192.168.4.1 / 热点侧 192.168.5.1。"
+        )
+    elif le and not ls:
+        tail = "兼容性：请使用（1）以太网测试；本模式无 SoftAP LAN，一般不要用（2）。"
+    elif ls and not le:
+        tail = "兼容性：请使用（2）Wi‑Fi 测试连 SoftAP；本模式无 ETH LAN，不要用（1）。"
+    else:
+        tail = "兼容性：请按实际接线在（1）（2）中择一；若均无，固件可能未暴露 LAN 口。"
+    return head + " " + tail
 
 
 def wan_types_from_modes(modes: List[dict]) -> List[int]:
@@ -181,6 +263,10 @@ class AdminPages:
             fn = getattr(self, "_network_on_show", None)
             if callable(fn):
                 fn()
+        if page_id == "stability":
+            fn = getattr(self, "_stability_on_show", None)
+            if callable(fn):
+                fn()
 
     # --- helpers ---
     def _client(self) -> SerialApiClient:
@@ -188,6 +274,49 @@ class AdminPages:
 
     def _log(self, msg: str) -> None:
         self.ctx.log(msg)
+
+    def _sync_softap_to_stability(self, ssid: str, password: str) -> None:
+        """将网络配置里 WiFi 热点（SoftAP）的 SSID/密码写入稳定性测试的 Wi‑Fi 区块。"""
+        v_ssid = getattr(self, "_stab_wf_ssid", None)
+        v_pwd = getattr(self, "_stab_wf_pwd", None)
+        if v_ssid is None or v_pwd is None:
+            return
+        s = (ssid or "").strip()
+        if not s:
+            return
+        v_ssid.set(s)
+        v_pwd.set(password or "")
+        self._log("已同步 SoftAP SSID/密码 → 稳定性测试 Wi‑Fi")
+
+    def _persist_network_config_local(self, data: dict) -> None:
+        """将网络配置表单快照写入本机 logs/network_config_local.json（与自动 log 同目录策略）。"""
+        try:
+            p = _local_network_config_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _softap_password_from_local_cache(self, ssid: str) -> str:
+        """本机副本中与 SSID 匹配的 SoftAP 密码（设备 API 常不返回已保存密码）。"""
+        s = (ssid or "").strip()
+        if not s:
+            return ""
+        try:
+            p = _local_network_config_path()
+            if not p.is_file():
+                return ""
+            with open(p, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            sp = d.get("softap") if isinstance(d, dict) else None
+            if not isinstance(sp, dict):
+                return ""
+            if str(sp.get("ssid") or "").strip() != s:
+                return ""
+            return str(sp.get("password") or "")
+        except (OSError, json.JSONDecodeError, TypeError):
+            return ""
 
     # --- overview ---
     def _build_overview(self) -> None:
@@ -344,6 +473,8 @@ class AdminPages:
 
     # --- network (panel visibility / load / save order aligned with webPage/js/app.js) ---
     def _build_network(self) -> None:
+        from .stability_pc import IS_WINDOWS, list_net_adapter_names, wlan_validate_sta_before_device_save
+
         fr = ttk.LabelFrame(self._container, text="网络配置", padding=8)
         self.pages["network"] = fr
         outer = ttk.Frame(fr)
@@ -511,23 +642,67 @@ class AdminPages:
 
         def save_sta() -> None:
             if not sta_ssid.get().strip():
-                messagebox.showwarning("STA", "请填写 SSID")
+                messagebox.showwarning("STA", "请填写 SSID", parent=self.ctx.root)
+                return
+            ssid = sta_ssid.get().strip()
+            pwd = sta_pwd.get()
+
+            if not IS_WINDOWS:
+                if not messagebox.askyesno(
+                    "STA",
+                    "非 Windows 无法在本机连接该 Wi‑Fi 做校验。\n是否仍直接保存到设备？",
+                    parent=self.ctx.root,
+                ):
+                    return
+
+                def work_direct() -> None:
+                    self._client().post_json(P_WIFI_STA, {"ssid": ssid, "password": pwd})
+
+                def ok_direct(_: Any) -> None:
+                    messagebox.showinfo("STA", "已保存到设备", parent=self.ctx.root)
+                    self._log("STA 已保存（未做本机 Wi‑Fi 校验）")
+
+                def er_direct(e: BaseException) -> None:
+                    messagebox.showerror("STA", str(e), parent=self.ctx.root)
+
+                _run_bg(self.ctx.root, work_direct, ok_direct, er_direct)
                 return
 
-            def work() -> None:
-                self._client().post_json(
-                    P_WIFI_STA,
-                    {"ssid": sta_ssid.get().strip(), "password": sta_pwd.get()},
+            wifi_names = list_net_adapter_names("wifi")
+            if not wifi_names:
+                messagebox.showerror(
+                    "STA",
+                    "未检测到无线网卡，无法在本机连接测试。\n请启用 WLAN 后再试。",
+                    parent=self.ctx.root,
                 )
+                return
+            iface = wifi_names[0]
 
-            def ok(_: Any) -> None:
-                messagebox.showinfo("STA", "已保存")
-                self._log("STA 已保存")
+            def work() -> None:
+                ok_pc, detail = wlan_validate_sta_before_device_save(ssid, pwd, iface)
+                if not ok_pc:
+                    raise ValueError(detail)
+                self._client().post_json(P_WIFI_STA, {"ssid": ssid, "password": pwd})
 
-            def er(e: BaseException) -> None:
-                messagebox.showerror("STA", str(e))
+            def ok_save(_: Any) -> None:
+                messagebox.showinfo(
+                    "STA",
+                    "本机已成功连接该 Wi‑Fi 并拿到地址，已写入设备。",
+                    parent=self.ctx.root,
+                )
+                self._log(f"STA 已保存（本机网卡 {iface} 校验通过）")
 
-            _run_bg(self.ctx.root, work, ok, er)
+            def er_save(e: BaseException) -> None:
+                if isinstance(e, ValueError):
+                    messagebox.showerror(
+                        "STA",
+                        "本机 Wi‑Fi 校验失败，未写入设备。\n\n" + str(e)[:2000],
+                        parent=self.ctx.root,
+                    )
+                else:
+                    messagebox.showerror("STA", str(e), parent=self.ctx.root)
+
+            _run_bg(self.ctx.root, work, ok_save, er_save)
 
         def clear_sta() -> None:
             def work() -> None:
@@ -765,7 +940,11 @@ class AdminPages:
                     ap_pwd.set("")
                     ap_hid.set(bool(ap.get("hidden_ssid")))
 
-                self._log("网络配置已读取")
+                if cur_mode and cur_mode.get("lan_softap") and isinstance(ap, dict) and (str(ap.get("ssid") or "").strip()):
+                    self._sync_softap_to_stability(ap_ssid.get().strip(), ap_pwd.get())
+
+                self._persist_network_config_local(_network_snapshot_dict())
+                self._log("网络配置已读取（本机副本已更新）")
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("网络配置", str(e))
@@ -866,6 +1045,10 @@ class AdminPages:
             def ok(_: Any) -> None:
                 messagebox.showinfo("网络", "网络配置已保存")
                 self._log("/api/network/config 已 POST")
+                self._persist_network_config_local(_network_snapshot_dict())
+                self._log(f"本机网络配置副本：{_local_network_config_path().name}")
+                if row_pre and row_pre.get("lan_softap"):
+                    self._sync_softap_to_stability(ap_ssid.get().strip(), ap_pwd.get())
 
             def er(e: BaseException) -> None:
                 messagebox.showerror("网络", str(e))
@@ -881,6 +1064,41 @@ class AdminPages:
         wan_combo.bind("<<ComboboxSelected>>", on_wan_change)
         mode_combo.bind("<<ComboboxSelected>>", on_mode_combo_change)
         self._network_on_show = load_network
+
+        def _network_snapshot_dict() -> dict:
+            return {
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+                "wan_combo": wan_combo.get(),
+                "mode_combo": mode_combo.get(),
+                "work_mode_id": selected_mode_id(),
+                "eth_wan": {
+                    "dhcp": ew_dhcp.get(),
+                    "ip": ew_ip.get().strip(),
+                    "mask": ew_mask.get().strip(),
+                    "gw": ew_gw.get().strip(),
+                    "dns1": ew_d1.get().strip(),
+                    "dns2": ew_d2.get().strip(),
+                },
+                "sta": {
+                    "ssid": sta_ssid.get().strip(),
+                    "password": sta_pwd.get(),
+                },
+                "softap": {
+                    "ssid": ap_ssid.get().strip(),
+                    "encryption_mode": ap_enc.get(),
+                    "password": ap_pwd.get(),
+                    "hidden_ssid": ap_hid.get(),
+                },
+                "lan": {
+                    "ip": lan_ip.get().strip(),
+                    "mask": lan_mask.get().strip(),
+                    "dhcp_enabled": lan_dhcp.get(),
+                    "dhcp_start": lan_s.get().strip(),
+                    "dhcp_end": lan_e.get().strip(),
+                    "dns1": lan_d1.get().strip(),
+                    "dns2": lan_d2.get().strip(),
+                },
+            }
 
         toggle_network_panels()
         btnf.pack(fill=tk.X, pady=(24, 8))
@@ -1199,12 +1417,14 @@ class AdminPages:
             list_net_adapter_names,
             run_eth_loop,
             run_wifi_loop,
+            stability_test_power_session_enter,
+            stability_test_power_session_leave,
         )
 
         fr = ttk.Frame(self._container)
         self.pages["stability"] = fr
+        self._stability_on_show = lambda: None
         fr.grid_columnconfigure(0, weight=1)
-        fr.grid_rowconfigure(3, weight=1)
 
         if not IS_WINDOWS:
             ttk.Label(fr, text="当前非 Windows 系统，此功能不可用。", foreground="red").grid(
@@ -1282,6 +1502,10 @@ class AdminPages:
 
         def clear_test_log() -> None:
             out.delete("1.0", tk.END)
+
+        stab_mode_var = tk.StringVar(
+            value="设备模式：连接串口后进入本页将自动读取；亦可点「刷新模式」。"
+        )
 
         result_tb = ttk.Frame(result_lf)
         result_tb.pack(fill=tk.X, anchor=tk.W, pady=(0, 2))
@@ -1375,8 +1599,25 @@ class AdminPages:
 
             _run_bg(self.ctx.root, work, ok, er)
 
-        eth_fr = ttk.LabelFrame(fr, text="（1）以太网：定时禁用/启用后检测", padding=4)
-        eth_fr.grid(row=0, column=0, sticky=tk.EW, pady=(0, 2))
+        mode_lf = ttk.LabelFrame(fr, text="与设备工作模式（W5500 / Wi‑Fi）", padding=4)
+        mode_lf.grid(row=0, column=0, sticky=tk.EW, pady=(0, 4))
+        mode_row = ttk.Frame(mode_lf)
+        mode_row.pack(fill=tk.X)
+        ttk.Label(
+            mode_row,
+            textvariable=stab_mode_var,
+            foreground="gray",
+            wraplength=760,
+            justify=tk.LEFT,
+            font=("Segoe UI", 9),
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(mode_row, text="刷新模式", command=lambda: self._stability_on_show()).pack(
+            side=tk.RIGHT, padx=(8, 0)
+        )
+
+        stab_tests_mid = ttk.Frame(fr)
+        eth_fr = ttk.LabelFrame(stab_tests_mid, text="（1）以太网：定时禁用/启用后检测", padding=4)
+        eth_fr.pack(fill=tk.X, pady=(0, 2))
         eth_disable_wifi = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             eth_fr,
@@ -1497,7 +1738,11 @@ class AdminPages:
                 self.ctx.root.after(0, lambda m=msg: append_line(m))
 
             def done() -> None:
-                self.ctx.root.after(0, eth_done)
+                def _ui() -> None:
+                    stability_test_power_session_leave(append_line)
+                    eth_done()
+
+                self.ctx.root.after(0, _ui)
 
             def run() -> None:
                 run_eth_loop(cfg, eth_stop, log, done, on_cycle_result=_on_eth_cycle)
@@ -1506,6 +1751,7 @@ class AdminPages:
             eth_thr["t"] = t
             eth_btn_start.configure(state=tk.DISABLED)
             eth_btn_stop.configure(state=tk.NORMAL)
+            stability_test_power_session_enter(append_line)
             append_line("--- 以太网测试开始 ---")
             t.start()
 
@@ -1516,8 +1762,8 @@ class AdminPages:
         eth_btn_start.configure(command=start_eth)
         eth_btn_stop.configure(command=stop_eth)
 
-        wf_fr = ttk.LabelFrame(fr, text="（2）Wi‑Fi：定时禁用/启用后连接热点并检测", padding=4)
-        wf_fr.grid(row=1, column=0, sticky=tk.EW, pady=(0, 2))
+        wf_fr = ttk.LabelFrame(stab_tests_mid, text="（2）Wi‑Fi：定时禁用/启用后连接热点并检测", padding=4)
+        wf_fr.pack(fill=tk.X, pady=(0, 2))
         wf_fr.grid_columnconfigure(0, weight=1)
         wf_disable_eth = tk.BooleanVar(value=True)
         ttk.Checkbutton(
@@ -1639,7 +1885,11 @@ class AdminPages:
                 self.ctx.root.after(0, lambda m=msg: append_line(m))
 
             def done() -> None:
-                self.ctx.root.after(0, wf_done)
+                def _ui() -> None:
+                    stability_test_power_session_leave(append_line)
+                    wf_done()
+
+                self.ctx.root.after(0, _ui)
 
             def run() -> None:
                 run_wifi_loop(cfg, ssid, pwd, wifi_stop, log, done, on_cycle_result=_on_wf_cycle)
@@ -1648,6 +1898,7 @@ class AdminPages:
             wifi_thr["t"] = t
             wf_btn_start.configure(state=tk.DISABLED)
             wf_btn_stop.configure(state=tk.NORMAL)
+            stability_test_power_session_enter(append_line)
             append_line("--- Wi‑Fi 测试开始 ---")
             t.start()
 
@@ -1687,8 +1938,8 @@ class AdminPages:
                 "dashboard_every_n_rounds": max(0, dn),
             }
 
-        adv_fr = ttk.LabelFrame(fr, text="（3）取证与长测（可选）", padding=4)
-        adv_fr.grid(row=2, column=0, sticky=tk.EW, pady=(0, 2))
+        adv_fr = ttk.LabelFrame(stab_tests_mid, text="（3）取证与长测（可选）", padding=4)
+        adv_fr.pack(fill=tk.X, pady=(0, 2))
         adv_r1 = ttk.Frame(adv_fr)
         adv_r1.pack(fill=tk.X, anchor=tk.W)
         ttk.Label(adv_r1, text="LAN 网关取证 ping").pack(side=tk.LEFT)
@@ -1704,7 +1955,99 @@ class AdminPages:
         ttk.Label(adv_r2, text="每 N 轮概览(0=关)").pack(side=tk.LEFT, padx=(8, 0))
         ttk.Entry(adv_r2, textvariable=stab_dash_n, width=5).pack(side=tk.LEFT, padx=(4, 0))
 
-        result_lf.grid(row=3, column=0, sticky=tk.NSEW, pady=(4, 0))
+        def apply_stab_visibility(le: Optional[bool], ls: Optional[bool]) -> None:
+            """
+            按当前模式是否含以太网 LAN / Wi‑Fi(SoftAP) LAN 显示（1）（2）；
+            （3）在任一路 LAN 需要时显示。隐藏时「测试结果」整体上移。
+            le/ls 为 None 时视为未解析，显示全部（与首次进入一致）。
+            """
+            if le is None or ls is None:
+                le, ls = True, True
+            eth_fr.pack_forget()
+            wf_fr.pack_forget()
+            adv_fr.pack_forget()
+            if le:
+                eth_fr.pack(fill=tk.X, pady=(0, 2))
+            if ls:
+                wf_fr.pack(fill=tk.X, pady=(0, 2))
+            if le or ls:
+                adv_fr.pack(fill=tk.X, pady=(0, 2))
+            if le or ls:
+                stab_tests_mid.grid(row=1, column=0, sticky=tk.EW)
+                result_lf.grid(row=2, column=0, sticky=tk.NSEW, pady=(4, 0))
+                fr.grid_rowconfigure(1, weight=0)
+                fr.grid_rowconfigure(2, weight=1)
+            else:
+                stab_tests_mid.grid_remove()
+                result_lf.grid(row=1, column=0, sticky=tk.NSEW, pady=(4, 0))
+                fr.grid_rowconfigure(1, weight=1)
+                fr.grid_rowconfigure(2, weight=0)
+
+        self._apply_stab_visibility = apply_stab_visibility
+        apply_stab_visibility(None, None)
+
+        def refresh_stab_mode_hint() -> None:
+            def work() -> Tuple[dict, dict, dict]:
+                c = self._client()
+                mode = c.get(P_MODE)
+                ap: dict = {}
+                net: dict = {}
+                try:
+                    r = c.get(P_WIFI_AP)
+                    if isinstance(r, dict):
+                        ap = r
+                except SerialApiError:
+                    pass
+                try:
+                    r2 = c.get(P_NET)
+                    if isinstance(r2, dict):
+                        net = r2
+                except SerialApiError:
+                    pass
+                return mode, ap, net
+
+            def ok(tup: Tuple[dict, dict, dict]) -> None:
+                mode, ap, net = tup
+                try:
+                    stab_mode_var.set(format_stability_mode_hint(mode))
+                    le, ls = stab_mode_lan_flags(mode)
+                    fn = getattr(self, "_apply_stab_visibility", None)
+                    if callable(fn):
+                        fn(le, ls)
+                except Exception as e:
+                    stab_mode_var.set(f"设备模式：解析失败 {e!r}")
+                    fn = getattr(self, "_apply_stab_visibility", None)
+                    if callable(fn):
+                        fn(None, None)
+                    return
+                row = _stab_resolve_current_mode_row(mode) if isinstance(mode, dict) else None
+                if row and row.get("lan_softap") and isinstance(ap, dict):
+                    ssid = str(ap.get("ssid") or "").strip()
+                    if ssid:
+                        wf_ssid.set(ssid)
+                        pwd = str(ap.get("password") or "").strip()
+                        if not pwd:
+                            pwd = self._softap_password_from_local_cache(ssid)
+                        wf_pwd.set(pwd)
+                if isinstance(net, dict):
+                    lan = net.get("lan") if isinstance(net.get("lan"), dict) else {}
+                    ip = str(lan.get("ip") or "").strip()
+                    if ip:
+                        stab_lan_gw.set(ip)
+                        stab_dash_url.set(f"http://{ip}")
+
+            def er(e: BaseException) -> None:
+                stab_mode_var.set(f"设备模式：读取失败（{e}）。请先连接串口。")
+                fn = getattr(self, "_apply_stab_visibility", None)
+                if callable(fn):
+                    fn(None, None)
+
+            _run_bg(self.ctx.root, work, ok, er)
+
+        self._stability_on_show = refresh_stab_mode_hint
+
+        self._stab_wf_ssid = wf_ssid
+        self._stab_wf_pwd = wf_pwd
         refresh_adapters()
 
     def _build_reboot(self) -> None:
