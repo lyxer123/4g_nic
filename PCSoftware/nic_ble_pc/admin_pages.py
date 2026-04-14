@@ -338,7 +338,10 @@ class AdminPages:
         iface_txt.pack(fill=tk.BOTH, expand=True)
 
         sys_labels: Dict[str, tk.StringVar] = {k: tk.StringVar(value="—") for k in ("mode", "model", "ver", "time", "mem", "uptime", "users")}
-        cell_labels: Dict[str, tk.StringVar] = {k: tk.StringVar(value="—") for k in ("op", "nm", "imei", "iccid", "sig", "usb")}
+        cell_labels: Dict[str, tk.StringVar] = {
+            k: tk.StringVar(value="—")
+            for k in ("op", "nm", "act", "imsi", "imei", "iccid", "sig", "rssi_ber", "maker", "module", "fw", "ppp", "usb")
+        }
 
         def row(parent: ttk.Frame, r: int, a: str, var: tk.StringVar) -> None:
             ttk.Label(parent, text=a).grid(row=r, column=0, sticky=tk.W, padx=(0, 8), pady=2)
@@ -358,9 +361,16 @@ class AdminPages:
         pairs_cell = [
             ("运营商", "op"),
             ("网络模式", "nm"),
+            ("网络制式ACT", "act"),
+            ("IMSI", "imsi"),
             ("IMEI", "imei"),
             ("ICCID", "iccid"),
             ("网络信号", "sig"),
+            ("RSSI/BER", "rssi_ber"),
+            ("模块厂商", "maker"),
+            ("模块型号", "module"),
+            ("模块固件", "fw"),
+            ("PPP已拨号", "ppp"),
             ("USB", "usb"),
         ]
         for i, (a, k) in enumerate(pairs_cell):
@@ -378,7 +388,7 @@ class AdminPages:
         def apply_dash(d: dict) -> None:
             sys = d.get("system") or {}
             sys_labels["mode"].set(str(sys.get("system_mode") or "—"))
-            sys_labels["model"].set("4G_NIC")
+            sys_labels["model"].set(str(sys.get("model") or "4G_NIC"))
             sys_labels["ver"].set(str(sys.get("firmware_version") or "—"))
             sys_labels["time"].set(str(sys.get("system_time") or "—"))
             mp = sys.get("memory_percent")
@@ -387,11 +397,27 @@ class AdminPages:
             ou = sys.get("online_users")
             sys_labels["users"].set(str(ou) if ou is not None else "—")
             cel = d.get("cellular") or {}
+            if not cel.get("usb_lte_ready"):
+                cell_kv.pack_forget()
+            else:
+                # 重新显示在接口状态之前
+                cell_kv.pack(fill=tk.X, pady=(8, 0), before=if_kv)
+                
             cell_labels["op"].set(str(cel.get("operator") or "—"))
             cell_labels["nm"].set(str(cel.get("network_mode") or "—"))
+            act = cel.get("network_act")
+            cell_labels["act"].set(str(act) if act is not None else "—")
+            cell_labels["imsi"].set(str(cel.get("imsi") or "—"))
             cell_labels["imei"].set(str(cel.get("imei") or "—"))
             cell_labels["iccid"].set(str(cel.get("iccid") or "—"))
             cell_labels["sig"].set(str(cel.get("signal") or "—"))
+            rssi = cel.get("signal_rssi")
+            ber = cel.get("signal_ber")
+            cell_labels["rssi_ber"].set(f'{rssi if rssi is not None else "—"} / {ber if ber is not None else "—"}')
+            cell_labels["maker"].set(str(cel.get("manufacturer") or "—"))
+            cell_labels["module"].set(str(cel.get("module_name") or "—"))
+            cell_labels["fw"].set(str(cel.get("fw_version") or "—"))
+            cell_labels["ppp"].set("是" if cel.get("ppp_has_ip") else "否")
             cell_labels["usb"].set(str(cel.get("usb_probe") or "—"))
             ifaces = d.get("interfaces") or []
             lines: List[str] = []

@@ -1360,9 +1360,17 @@ static esp_err_t uri_dashboard_overview_get(httpd_req_t *req)
     cJSON *cell = cJSON_CreateObject();
     cJSON_AddStringToObject(cell, "operator", "--");
     cJSON_AddStringToObject(cell, "network_mode", "--");
+    cJSON_AddStringToObject(cell, "imsi", "--");
     cJSON_AddStringToObject(cell, "imei", "--");
     cJSON_AddStringToObject(cell, "iccid", "--");
     cJSON_AddStringToObject(cell, "signal", "--");
+    cJSON_AddNumberToObject(cell, "signal_rssi", 99);
+    cJSON_AddNumberToObject(cell, "signal_ber", 99);
+    cJSON_AddNumberToObject(cell, "network_act", -1);
+    cJSON_AddStringToObject(cell, "manufacturer", "--");
+    cJSON_AddStringToObject(cell, "module_name", "--");
+    cJSON_AddStringToObject(cell, "fw_version", "--");
+    cJSON_AddBoolToObject(cell, "ppp_has_ip", false);
     uint16_t vid = 0;
     uint16_t pid = 0;
     system_usb_cat1_detect_last_ids(&vid, &pid);
@@ -1375,8 +1383,16 @@ static esp_err_t uri_dashboard_overview_get(httpd_req_t *req)
     if (esp_bridge_modem_get_info(&mi) == ESP_OK && mi.present) {
         cJSON_ReplaceItemInObject(cell, "operator", cJSON_CreateString(mi.operator_name));
         cJSON_ReplaceItemInObject(cell, "network_mode", cJSON_CreateString(mi.network_mode));
+        cJSON_ReplaceItemInObject(cell, "imsi", cJSON_CreateString(mi.imsi));
         cJSON_ReplaceItemInObject(cell, "imei", cJSON_CreateString(mi.imei));
         cJSON_ReplaceItemInObject(cell, "iccid", cJSON_CreateString(mi.iccid));
+        cJSON_ReplaceItemInObject(cell, "signal_rssi", cJSON_CreateNumber(mi.rssi));
+        cJSON_ReplaceItemInObject(cell, "signal_ber", cJSON_CreateNumber(mi.ber));
+        cJSON_ReplaceItemInObject(cell, "network_act", cJSON_CreateNumber(mi.act));
+        cJSON_ReplaceItemInObject(cell, "manufacturer", cJSON_CreateString(mi.manufacturer));
+        cJSON_ReplaceItemInObject(cell, "module_name", cJSON_CreateString(mi.module_name));
+        cJSON_ReplaceItemInObject(cell, "fw_version", cJSON_CreateString(mi.fw_version));
+        cJSON_ReplaceItemInObject(cell, "ppp_has_ip", cJSON_CreateBool(mi.ppp_has_ip));
         char sig[32];
         if (mi.rssi >= 0 && mi.rssi <= 31) {
             const int dbm = -113 + (2 * mi.rssi);

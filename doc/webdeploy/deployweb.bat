@@ -45,7 +45,7 @@ set "WWW_FLASH_OFFSET=0x360000"
 set "WWW_SIZE_HEX=0x10000"
 set "WWW_SIZE_DEC=65536"
 REM Port: use ESPPORT env if set, else default
-if not defined ESPPORT set "ESPPORT=COM8"
+if not defined ESPPORT set "ESPPORT=COM3"
 echo.
 echo ========================================
 echo Partition: www  offset !WWW_FLASH_OFFSET!  size !WWW_SIZE_HEX! (!WWW_SIZE_DEC! bytes)

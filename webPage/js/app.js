@@ -129,7 +129,7 @@
     const sys = d.system || {};
     const rows = [
       ['系统模式', sys.system_mode || '—'],
-      ['型号', '4G_NIC'],
+      ['型号', sys.model || '4G_NIC'],
       ['版本', sys.firmware_version || '—'],
       ['系统时间', sys.system_time || '—'],
       ['内存', sys.memory_percent != null ? sys.memory_percent + '%' : '—'],
@@ -144,9 +144,16 @@
     const cr = [
       ['运营商', cell.operator || '—'],
       ['网络模式', cell.network_mode || '—'],
+      ['网络制式ACT', cell.network_act != null ? String(cell.network_act) : '—'],
+      ['IMSI', cell.imsi || '—'],
       ['IMEI', cell.imei || '—'],
       ['ICCID', cell.iccid || '—'],
       ['网络信号', cell.signal || '—'],
+      ['RSSI/BER', (cell.signal_rssi != null ? String(cell.signal_rssi) : '—') + ' / ' + (cell.signal_ber != null ? String(cell.signal_ber) : '—')],
+      ['模块厂商', cell.manufacturer || '—'],
+      ['模块型号', cell.module_name || '—'],
+      ['模块固件', cell.fw_version || '—'],
+      ['PPP已拨号', cell.ppp_has_ip ? '是' : '否'],
       ['USB', cell.usb_probe || '—'],
     ];
     const ce = $('dashCell');

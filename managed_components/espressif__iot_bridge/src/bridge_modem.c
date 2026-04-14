@@ -125,17 +125,17 @@ static esp_err_t iccid_line_cb(uint8_t *data, size_t len)
     if (!data || len == 0) {
         return ESP_OK;
     }
-    /* Prefer ICCID-like runs (18–22 digits); ignore short spurious numbers on a line. */
+    /* Prefer ICCID-like runs (18–23 chars); ignore short spurious numbers on a line. */
     size_t best_len = 0;
     size_t best_start = 0;
     for (size_t i = 0; i < len; ) {
-        if (data[i] >= '0' && data[i] <= '9') {
+        if ((data[i] >= '0' && data[i] <= '9') || (data[i] >= 'A' && data[i] <= 'F') || (data[i] >= 'a' && data[i] <= 'f')) {
             size_t j = i;
-            while (j < len && data[j] >= '0' && data[j] <= '9') {
+            while (j < len && ((data[j] >= '0' && data[j] <= '9') || (data[j] >= 'A' && data[j] <= 'F') || (data[j] >= 'a' && data[j] <= 'f'))) {
                 j++;
             }
             size_t run = j - i;
-            if (run >= 18 && run <= 22 && run > best_len) {
+            if (run >= 18 && run <= 23 && run > best_len) {
                 best_len = run;
                 best_start = i;
             }
@@ -148,7 +148,7 @@ static esp_err_t iccid_line_cb(uint8_t *data, size_t len)
         int start = -1;
         int end = -1;
         for (size_t i = 0; i < len; i++) {
-            if (data[i] >= '0' && data[i] <= '9') {
+            if ((data[i] >= '0' && data[i] <= '9') || (data[i] >= 'A' && data[i] <= 'F') || (data[i] >= 'a' && data[i] <= 'f')) {
                 if (start < 0) {
                     start = (int)i;
                 }
@@ -178,14 +178,14 @@ static void extract_iccid_from_text(const char *text, char *out, size_t out_sz)
     size_t best_len = 0;
     const char *best = NULL;
     for (const char *p = text; *p; ) {
-        if (*p >= '0' && *p <= '9') {
+        if ((*p >= '0' && *p <= '9') || (*p >= 'A' && *p <= 'F') || (*p >= 'a' && *p <= 'f')) {
             const char *s = p;
             size_t L = 0;
-            while (p[0] >= '0' && p[0] <= '9') {
+            while ((p[0] >= '0' && p[0] <= '9') || (p[0] >= 'A' && p[0] <= 'F') || (p[0] >= 'a' && p[0] <= 'f')) {
                 L++;
                 p++;
             }
-            if (L >= 18 && L <= 22 && L > best_len) {
+            if (L >= 18 && L <= 23 && L > best_len) {
                 best_len = L;
                 best = s;
             }
@@ -339,6 +339,7 @@ esp_err_t esp_bridge_modem_get_info(esp_bridge_modem_info_t *info)
     if (try_iccid_at(s_dce, "AT+MCCID", info->iccid, sizeof(info->iccid)) != ESP_OK &&
         try_iccid_at(s_dce, "AT+MCCID?", info->iccid, sizeof(info->iccid)) != ESP_OK &&
         try_iccid_at(s_dce, "AT+ICCID", info->iccid, sizeof(info->iccid)) != ESP_OK &&
+        try_iccid_at(s_dce, "AT+CICCID", info->iccid, sizeof(info->iccid)) != ESP_OK &&
         try_iccid_at(s_dce, "AT+CCID", info->iccid, sizeof(info->iccid)) != ESP_OK &&
         try_iccid_at(s_dce, "AT+QCCID", info->iccid, sizeof(info->iccid)) != ESP_OK) {
         memset(s_iccid_parse_buf, 0, sizeof(s_iccid_parse_buf));
@@ -348,7 +349,10 @@ esp_err_t esp_bridge_modem_get_info(esp_bridge_modem_info_t *info)
                 memset(s_iccid_parse_buf, 0, sizeof(s_iccid_parse_buf));
                 if (esp_modem_command(s_dce, "AT+ICCID\r", iccid_line_cb, 4000) != ESP_OK || s_iccid_parse_buf[0] == '\0') {
                     memset(s_iccid_parse_buf, 0, sizeof(s_iccid_parse_buf));
-                    (void)esp_modem_command(s_dce, "AT+CCID\r", iccid_line_cb, 4000);
+                    if (esp_modem_command(s_dce, "AT+CICCID\r", iccid_line_cb, 4000) != ESP_OK || s_iccid_parse_buf[0] == '\0') {
+                        memset(s_iccid_parse_buf, 0, sizeof(s_iccid_parse_buf));
+                        (void)esp_modem_command(s_dce, "AT+CCID\r", iccid_line_cb, 4000);
+                    }
                 }
             }
         }
