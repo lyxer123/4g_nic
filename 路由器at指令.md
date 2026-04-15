@@ -81,6 +81,14 @@
 | `AT+GMR` | 查询版本：应用版本（`esp_app_desc`）与 **IDF 版本**（`esp_get_idf_version()`）。 |
 | `AT+RST` | 返回 `OK` 后 **重启设备**（与官方「复位模块」语义类似，请谨慎使用）。 |
 | `AT+CMD` | 文本列出当前固件支持的命令名（简化版 `+CMD:` 行，非官方 Test 查询语法）。 |
+| `AT+PING` | 链路就绪/存活检查，返回 `+PING:ok cmd=ping device=4g_nic`。 |
+| `AT+MODE` | 查询当前 `work_mode_id`；配合 `AT+MODE=<id>` 设置工作模式。 |
+| `AT+MODEMINFO` | 查询 4G 调制解调器信息（SIM/IMEI/IMSI/运营商/RSSI 等），等价于 CLI `modem_info`。 |
+| `AT+W5500` | 查询 W5500 是否存在及探测到的版本号，等价于硬件检测结果。 |
+| `AT+W5500IP` | 查询 W5500 对应以太网接口的 IP、掩码和网关；如果当前以太接口无 IP，则返回 `0.0.0.0`。 |
+| `AT+USB4G` | 查询 USB Cat1 4G 调制解调器是否存在，返回 `present` 及 VID/PID。 |
+| `AT+USB4GIP` | 查询 USB Cat1 PPP 接口的 IP、掩码和网关；若未分配 IP 则返回 `0.0.0.0`。 |
+| `AT+NETCHECK` | 检测路由器外网连通性，通过访问 `http://www.baidu.com/` 判断是否能够联网。 |
 | `AT+SYSRAM` | 查询内部堆与 DMA 能力堆空闲（`heap_caps`），用于诊断。 |
 | `AT+ROUTER` | **本项目扩展**：返回当前 **有效 UART 号**、是否与控制台 **共用**、**当前波特率** 等。 |
 
@@ -107,3 +115,10 @@
 | 日期 | 说明 |
 |------|------|
 | 2026-04-12 | 首版：UART 可配置 + NVS 覆盖、`AT`/`ATE`/`AT+GMR`/`AT+RST`/`AT+CMD`/`AT+SYSRAM`/`AT+ROUTER`；与 `serial_cli` 共用 UART0 时分流。 |
+| 2026-04-15 | 新增 AT+PING、AT+MODE 查询/设置命令；将现有 CLI `ping`、`mode_get`/`mode_set` 语义映射为 AT 子集。 |
+| 2026-04-15 | 新增 AT+MODEMINFO 命令，映射当前 CLI `modem_info`。 |
+| 2026-04-15 | 新增 AT+W5500 命令，查询 W5500 硬件是否存在以及版本寄存器值。 |
+| 2026-04-15 | 新增 AT+W5500IP 命令，查询 W5500 以太网接口的 IP、掩码和网关。 |
+| 2026-04-15 | 新增 AT+USB4G 命令，检测 USB Cat1 4G 调制解调器存在性并返回 VID/PID。 |
+| 2026-04-15 | 新增 AT+USB4GIP 命令，查询 USB Cat1 PPP 接口的 IP、掩码和网关。 |
+| 2026-04-15 | 新增 AT+NETCHECK 命令，检测外网连通性（访问 www.baidu.com）。 |

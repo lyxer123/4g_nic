@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <strings.h>
 
 #include "driver/uart.h"
@@ -13,14 +14,20 @@
 #include "esp_idf_version.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_system.h"
+#include "esp_bridge.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "sdkconfig.h"
 
 #include "router_at.h"
+#include "system_w5500_detect.h"
+#include "system_usb_cat1_detect.h"
+#include "web_service.h"
 
 static const char *TAG = "router_at";
 
@@ -77,6 +84,21 @@ static void at_write(void (*write_bytes)(const void *, size_t), const char *s)
     }
 }
 
+static void at_write_fmt(void (*write_bytes)(const void *, size_t), const char *fmt, ...)
+{
+    if (!write_bytes || !fmt) {
+        return;
+    }
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int len = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (len > 0) {
+        write_bytes(buf, (size_t)len);
+    }
+}
+
 static void at_ok(void (*write_bytes)(const void *, size_t))
 {
     at_write(write_bytes, "\r\nOK\r\n");
@@ -85,6 +107,46 @@ static void at_ok(void (*write_bytes)(const void *, size_t))
 static void at_error(void (*write_bytes)(const void *, size_t))
 {
     at_write(write_bytes, "\r\nERROR\r\n");
+}
+
+static bool get_netif_ip_info(const char *key, esp_netif_ip_info_t *out)
+{
+    if (!out) {
+        return false;
+    }
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey(key);
+    if (!netif) {
+        return false;
+    }
+    if (esp_netif_get_ip_info(netif, out) != ESP_OK) {
+        return false;
+    }
+    return out->ip.addr != 0;
+}
+
+static bool http_probe_url(const char *url, const char *host_hdr, int *out_code, esp_err_t *out_err)
+{
+    if (!url || !out_code || !out_err) {
+        return false;
+    }
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .timeout_ms = 7000,
+        .addr_type = HTTP_ADDR_TYPE_INET,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        *out_err = ESP_FAIL;
+        *out_code = 0;
+        return false;
+    }
+    if (host_hdr) {
+        esp_http_client_set_header(client, "Host", host_hdr);
+    }
+    *out_err = esp_http_client_perform(client);
+    *out_code = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    return (*out_err == ESP_OK && *out_code > 0);
 }
 
 static void maybe_echo_line(void (*write_bytes)(const void *, size_t), const char *line)
@@ -178,8 +240,148 @@ static void handle_at_line_inner(const char *line_raw, void (*write_bytes)(const
 
     if (strcmp(name, "CMD") == 0) {
         at_write(write_bytes,
-                 "\r\n+CMD:AT,ATE0,ATE1,AT+GMR,AT+RST,AT+CMD,AT+SYSRAM,AT+ROUTER\r\n");
+                 "\r\n+CMD:AT,ATE0,ATE1,AT+GMR,AT+RST,AT+CMD,AT+SYSRAM,AT+ROUTER,AT+PING,AT+MODE,AT+MODEMINFO,AT+W5500,AT+W5500IP,AT+USB4G,AT+USB4GIP\r\n");
         at_ok(write_bytes);
+        return;
+    }
+
+    if (strcmp(name, "PING") == 0) {
+        at_write(write_bytes, "\r\n+PING:ok cmd=ping device=4g_nic\r\n");
+        at_ok(write_bytes);
+        return;
+    }
+
+    if (strcmp(name, "MODE") == 0) {
+        const char *q = sub;
+        while (*q && *q != '?' && *q != '=' && *q != ' ' && *q != '\t') {
+            q++;
+        }
+        while (*q == ' ' || *q == '\t') {
+            q++;
+        }
+        if (*q == '?' || *q == '\0') {
+            uint8_t m = 0;
+            esp_err_t e = web_service_get_work_mode_u8(&m);
+            if (e != ESP_OK) {
+                at_error(write_bytes);
+                return;
+            }
+            at_write_fmt(write_bytes, "\r\n+MODE:work_mode_id=%u\r\n", (unsigned)m);
+            at_ok(write_bytes);
+            return;
+        }
+        if (*q == '=') {
+            q++;
+            skip_sp(&q);
+            if (*q == '\0') {
+                at_error(write_bytes);
+                return;
+            }
+            char *endptr = NULL;
+            long v = strtol(q, &endptr, 10);
+            if (endptr == q || v < 0 || v > 255) {
+                at_error(write_bytes);
+                return;
+            }
+            esp_err_t e = web_service_apply_work_mode_id((uint8_t)v);
+            if (e != ESP_OK) {
+                at_error(write_bytes);
+                return;
+            }
+            at_write_fmt(write_bytes, "\r\n+MODE:ok work_mode_id=%u\r\n", (unsigned)v);
+            at_ok(write_bytes);
+            return;
+        }
+        at_error(write_bytes);
+        return;
+    }
+
+#if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_MODEM)
+    if (strcmp(name, "MODEMINFO") == 0) {
+        esp_bridge_modem_info_t mi;
+        esp_err_t e = esp_bridge_modem_get_info(&mi);
+        if (e != ESP_OK || e == ESP_ERR_INVALID_STATE || !mi.present) {
+            at_error(write_bytes);
+            return;
+        }
+        at_write_fmt(write_bytes,
+                     "\r\n+MODEMINFO:ppp_has_ip=%d,iccid=%s,imsi=%s,imei=%s,operator=%s,network_mode=%s,act=%d,rssi=%d,ber=%d,manufacturer=%s,model=%s,fw_version=%s\r\n",
+                     mi.ppp_has_ip ? 1 : 0,
+                     mi.iccid,
+                     mi.imsi,
+                     mi.imei,
+                     mi.operator_name,
+                     mi.network_mode,
+                     mi.act,
+                     mi.rssi,
+                     mi.ber,
+                     mi.manufacturer,
+                     mi.module_name,
+                     mi.fw_version);
+        at_ok(write_bytes);
+        return;
+    }
+#endif
+
+    if (strcmp(name, "W5500") == 0) {
+        bool present = system_w5500_detect_present();
+        uint8_t version = system_w5500_detect_version_raw();
+        at_write_fmt(write_bytes, "\r\n+W5500:present=%d,version=0x%02x\r\n", present ? 1 : 0,
+                     version);
+        at_ok(write_bytes);
+        return;
+    }
+
+    if (strcmp(name, "W5500IP") == 0) {
+        esp_netif_ip_info_t ip_info;
+        bool ok = get_netif_ip_info("ETH_WAN", &ip_info);
+        if (!ok) {
+            ok = get_netif_ip_info("ETH_LAN", &ip_info);
+        }
+        if (!ok) {
+            at_error(write_bytes);
+            return;
+        }
+        at_write_fmt(write_bytes, "\r\n+W5500IP:ip=" IPSTR ",mask=" IPSTR ",gateway=" IPSTR "\r\n",
+                     IP2STR(&ip_info.ip), IP2STR(&ip_info.netmask), IP2STR(&ip_info.gw));
+        at_ok(write_bytes);
+        return;
+    }
+
+    if (strcmp(name, "USB4G") == 0) {
+        bool present = system_usb_cat1_detect_present();
+        uint16_t vid = 0, pid = 0;
+        system_usb_cat1_detect_last_ids(&vid, &pid);
+        at_write_fmt(write_bytes, "\r\n+USB4G:present=%d,vid=0x%04x,pid=0x%04x\r\n", present ? 1 : 0,
+                     vid, pid);
+        at_ok(write_bytes);
+        return;
+    }
+
+    if (strcmp(name, "USB4GIP") == 0) {
+        esp_netif_ip_info_t ip_info;
+        if (!get_netif_ip_info("PPP_DEF", &ip_info)) {
+            at_error(write_bytes);
+            return;
+        }
+        at_write_fmt(write_bytes, "\r\n+USB4GIP:ip=" IPSTR ",mask=" IPSTR ",gateway=" IPSTR "\r\n",
+                     IP2STR(&ip_info.ip), IP2STR(&ip_info.netmask), IP2STR(&ip_info.gw));
+        at_ok(write_bytes);
+        return;
+    }
+
+    if (strcmp(name, "NETCHECK") == 0) {
+        int status = 0;
+        esp_err_t err = ESP_OK;
+        bool ok = http_probe_url("http://www.baidu.com/", NULL, &status, &err);
+        if (ok) {
+            at_write_fmt(write_bytes, "\r\n+NETCHECK:ok,method=http,target=www.baidu.com,status=%d\r\n", status);
+            at_ok(write_bytes);
+            return;
+        }
+        at_write_fmt(write_bytes, "\r\n+NETCHECK:fail,method=http,target=www.baidu.com,err=%s,status=%d\r\n",
+                     esp_err_to_name(err), status);
+        at_error(write_bytes);
         return;
     }
 
