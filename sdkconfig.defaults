@@ -55,6 +55,7 @@ CONFIG_LWIP_DHCP_DISABLE_CLIENT_ID=y
 # Override some defaults to enable PPP
 CONFIG_LWIP_PPP_SUPPORT=y
 CONFIG_LWIP_PPP_PAP_SUPPORT=y
+CONFIG_LWIP_PPP_SERVER_SUPPORT=y
 # Do not enable IPV6 in dte<->dce link local
 CONFIG_LWIP_PPP_ENABLE_IPV6=n
 # Disable legacy API
@@ -118,6 +119,13 @@ CONFIG_BRIDGE_ETH_SPI_CLOCK_MHZ=10
 # Router AT: UART0 = share with console/serial_cli (lines starting with AT); use UART1/2 + pins for dedicated MCU port.
 CONFIG_ROUTER_AT_ENABLE=y
 CONFIG_ROUTER_AT_UART_NUM=0
+
+# PPPoS server for MCU access over dedicated UART
+CONFIG_ROUTER_PPP_ENABLE=n
+CONFIG_ROUTER_PPP_UART_NUM=2
+CONFIG_ROUTER_PPP_UART_BAUD=115200
+CONFIG_ROUTER_PPP_UART_TX_GPIO=-1
+CONFIG_ROUTER_PPP_UART_RX_GPIO=-1
 
 # PPP: do not block boot forever when SIM has no data / wrong APN (see main/Kconfig.projbuild).
 CONFIG_BRIDGE_MODEM_WAIT_IP_TIMEOUT_MS=120000

@@ -1,0 +1,40 @@
+menu "Router PPPoS"
+
+    config ROUTER_PPP_ENABLE
+        bool "Enable router-side PPPoS server for external MCU"
+        default n
+        help
+            Start a PPP-over-Serial server on a dedicated UART so an external MCU
+            can establish a PPP session with the ESP32 router.
+
+    config ROUTER_PPP_UART_NUM
+        int "UART port used for PPPoS server"
+        default 2
+        range 0 2
+        depends on ROUTER_PPP_ENABLE
+        help
+            UART port for the PPPoS server. This port must not share the console
+            UART or the router AT UART when PPPoS is enabled.
+
+    config ROUTER_PPP_UART_BAUD
+        int "Baud rate for PPPoS UART"
+        default 115200
+        depends on ROUTER_PPP_ENABLE
+
+    config ROUTER_PPP_UART_TX_GPIO
+        int "TX GPIO for PPPoS UART"
+        default -1
+        range -1 48
+        depends on ROUTER_PPP_ENABLE
+        help
+            Set to -1 to use the UART default pin assignment.
+
+    config ROUTER_PPP_UART_RX_GPIO
+        int "RX GPIO for PPPoS UART"
+        default -1
+        range -1 48
+        depends on ROUTER_PPP_ENABLE
+        help
+            Set to -1 to use the UART default pin assignment.
+
+endmenu

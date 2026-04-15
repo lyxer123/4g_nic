@@ -240,7 +240,7 @@ static void handle_at_line_inner(const char *line_raw, void (*write_bytes)(const
 
     if (strcmp(name, "CMD") == 0) {
         at_write(write_bytes,
-                 "\r\n+CMD:AT,ATE0,ATE1,AT+GMR,AT+RST,AT+CMD,AT+SYSRAM,AT+ROUTER,AT+PING,AT+MODE,AT+MODEMINFO,AT+W5500,AT+W5500IP,AT+USB4G,AT+USB4GIP\r\n");
+                 "\r\n+CMD:AT,ATE0,ATE1,AT+GMR,AT+RST,AT+CMD,AT+SYSRAM,AT+ROUTER,AT+PING,AT+MODE,AT+MODEMINFO,AT+W5500,AT+W5500IP,AT+USB4G,AT+USB4GIP,AT+NETCHECK\r\n");
         at_ok(write_bytes);
         return;
     }

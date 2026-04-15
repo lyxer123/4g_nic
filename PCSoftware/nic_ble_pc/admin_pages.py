@@ -2124,6 +2124,13 @@ class AdminPages:
             ("AT+GMR", "AT+GMR"),
             ("AT+CMD", "AT+CMD"),
             ("AT+ROUTER", "AT+ROUTER"),
+            ("AT+MODE", "AT+MODE"),
+            ("AT+MODEMINFO", "AT+MODEMINFO"),
+            ("AT+W5500", "AT+W5500"),
+            ("AT+W5500IP", "AT+W5500IP"),
+            ("AT+USB4G", "AT+USB4G"),
+            ("AT+USB4GIP", "AT+USB4GIP"),
+            ("AT+NETCHECK", "AT+NETCHECK"),
             ("modem_info", "modem_info"),
             ("help", "help"),
         ]
@@ -2142,6 +2149,7 @@ class AdminPages:
         ttk.Label(
             fr,
             text="提示：modem_info 走 serial_cli（4G 模组信息）；AT+CMD 列出固件已实现的 AT 子集；"
+            "新增 AT+MODEMINFO、AT+W5500/AT+W5500IP、AT+USB4G/AT+USB4GIP、AT+NETCHECK。"
             "若 UART 与日志控制台共用，仅「像 AT 的一整行」会进 router_at。",
             foreground="gray",
             wraplength=640,
