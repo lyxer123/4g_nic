@@ -1,0 +1,3 @@
+# Minimum settings for ESP-IDF PPP client example
+CONFIG_LWIP_PPP_SUPPORT=y
+CONFIG_LWIP_PPP_MAXIDLE=0
