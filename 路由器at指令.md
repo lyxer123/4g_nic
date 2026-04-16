@@ -79,10 +79,15 @@
 | `ATE0` | 关闭命令回显。 |
 | `ATE1` | 开启命令回显（见 §4）。 |
 | `AT+GMR` | 查询版本：应用版本（`esp_app_desc`）与 **IDF 版本**（`esp_get_idf_version()`）。 |
+| `AT+IDF` | 查询当前编译程序使用的 **ESP-IDF 版本**。 |
+| `AT+CHIP` | 查询 ESP32 所在芯片型号、核数、修订号和特性。 |
+| `AT+MEM` | 查询芯片 Flash 与 PSRAM 大小，若不存在 PSRAM 则返回 `psram_size=0`。 |
 | `AT+RST` | 返回 `OK` 后 **重启设备**（与官方「复位模块」语义类似，请谨慎使用）。 |
 | `AT+CMD` | 文本列出当前固件支持的命令名（简化版 `+CMD:` 行，非官方 Test 查询语法）。 |
 | `AT+PING` | 链路就绪/存活检查，返回 `+PING:ok cmd=ping device=4g_nic`。 |
 | `AT+MODE` | 查询当前 `work_mode_id`；配合 `AT+MODE=<id>` 设置工作模式。 |
+| `AT+TIME` | 查询当前路由器系统本地时间；配合 `AT+TIME=<YYYY-MM-DD HH:MM:SS>` 设置路由器系统时间。 |
+| `AT+MODEMTIME` | 查询外置 4G 调制解调器时间（使用 `AT+CCLK?` 查询，需支持 4G 模组）。 |
 | `AT+MODEMINFO` | 查询 4G 调制解调器信息（SIM/IMEI/IMSI/运营商/RSSI 等），等价于 CLI `modem_info`。 |
 | `AT+W5500` | 查询 W5500 是否存在及探测到的版本号，等价于硬件检测结果。 |
 | `AT+W5500IP` | 查询 W5500 对应以太网接口的 IP、掩码和网关；如果当前以太接口无 IP，则返回 `0.0.0.0`。 |

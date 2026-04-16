@@ -21,7 +21,6 @@ static const char *TAG = "ppp_client";
 
 static esp_netif_t *s_ppp_netif = NULL;
 static TaskHandle_t s_uart_task = NULL;
-static esp_netif_driver_base_t s_driver = {0};
 static bool http_test_done = false;
 
 static esp_err_t uart_transmit(void *h, void *buffer, size_t len)
@@ -144,10 +143,6 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(esp_netif_set_driver_config(s_ppp_netif, &driver_ifconfig));
 
-    s_driver.transmit = uart_transmit;
-    s_driver.handle = (void *)(uintptr_t)PPP_UART_NUM;
-    ESP_ERROR_CHECK(esp_netif_attach(s_ppp_netif, &s_driver));
-
     esp_netif_ppp_config_t ppp_params = {
         .ppp_phase_event_enabled = false,
         .ppp_error_event_enabled = true,
@@ -164,7 +159,7 @@ void app_main(void)
                                                        s_ppp_netif,
                                                        NULL));
 
-    ESP_ERROR_CHECK(esp_netif_action_start(s_ppp_netif, NULL, 0, NULL));
+    esp_netif_action_start(s_ppp_netif, NULL, 0, NULL);
 
     xTaskCreate(uart_rx_task, "ppp_uart_rx", 4096, NULL, 5, &s_uart_task);
 

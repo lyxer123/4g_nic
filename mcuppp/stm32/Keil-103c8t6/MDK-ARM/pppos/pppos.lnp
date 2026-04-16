@@ -1,0 +1,28 @@
+--cpu Cortex-M3
+"pppos\startup_stm32f103xb.o"
+"pppos\main.o"
+"pppos\pppos_lwip.o"
+"pppos\lwip_app.o"
+"pppos\stm32f1xx_it.o"
+"pppos\stm32f1xx_hal_msp.o"
+"pppos\lwip_core.o"
+"pppos\lwip_api.o"
+"pppos\lwip_netif.o"
+"pppos\lwip_ppp.o"
+"pppos\stm32f1xx_hal_gpio_ex.o"
+"pppos\stm32f1xx_hal_uart.o"
+"pppos\stm32f1xx_hal.o"
+"pppos\stm32f1xx_hal_rcc.o"
+"pppos\stm32f1xx_hal_rcc_ex.o"
+"pppos\stm32f1xx_hal_gpio.o"
+"pppos\stm32f1xx_hal_dma.o"
+"pppos\stm32f1xx_hal_cortex.o"
+"pppos\stm32f1xx_hal_pwr.o"
+"pppos\stm32f1xx_hal_flash.o"
+"pppos\stm32f1xx_hal_flash_ex.o"
+"pppos\stm32f1xx_hal_exti.o"
+"pppos\system_stm32f1xx.o"
+--strict --scatter "pppos\pppos.sct"
+--summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols
+--info sizes --info totals --info unused --info veneers
+--list "pppos.map" -o pppos\pppos.axf

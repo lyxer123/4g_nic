@@ -11,6 +11,11 @@
 
 #include "driver/uart.h"
 #include "esp_app_desc.h"
+#include "esp_chip_info.h"
+#include "esp_flash.h"
+#if defined(CONFIG_SPIRAM) || defined(CONFIG_ESP32_SPIRAM_SUPPORT) || defined(CONFIG_ESP32S3_SPIRAM_SUPPORT)
+#include "esp_spiram.h"
+#endif
 #include "esp_idf_version.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
@@ -19,6 +24,8 @@
 #include "esp_netif.h"
 #include "esp_system.h"
 #include "esp_bridge.h"
+#include <sys/time.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
@@ -176,6 +183,43 @@ static bool parse_plus_name(const char *after_plus, char *out_sub, size_t out_sz
     return i > 0;
 }
 
+static size_t query_spiram_size(void)
+{
+#if defined(CONFIG_SPIRAM) || defined(CONFIG_ESP32_SPIRAM_SUPPORT) || defined(CONFIG_ESP32S3_SPIRAM_SUPPORT)
+    return esp_spiram_get_size();
+#else
+    return 0;
+#endif
+}
+
+static const char *chip_model_name(esp_chip_model_t model)
+{
+    switch (model) {
+    case CHIP_ESP32:
+        return "ESP32";
+    case CHIP_ESP32S2:
+        return "ESP32-S2";
+    case CHIP_ESP32S3:
+        return "ESP32-S3";
+    case CHIP_ESP32C3:
+        return "ESP32-C3";
+    case CHIP_ESP32C2:
+        return "ESP32-C2";
+    case CHIP_ESP32C6:
+        return "ESP32-C6";
+    case CHIP_ESP32H2:
+        return "ESP32-H2";
+    case CHIP_ESP32P4:
+        return "ESP32-P4";
+#ifdef CHIP_ESP32H4
+    case CHIP_ESP32H4:
+        return "ESP32-H4";
+#endif
+    default:
+        return "UNKNOWN";
+    }
+}
+
 static void handle_at_line_inner(const char *line_raw, void (*write_bytes)(const void *, size_t))
 {
     char buf[ROUTER_AT_LINE_MAX];
@@ -231,6 +275,55 @@ static void handle_at_line_inner(const char *line_raw, void (*write_bytes)(const
         return;
     }
 
+    if (strcmp(name, "IDF") == 0) {
+        at_write_fmt(write_bytes, "\r\n+IDF:%s\r\n", esp_get_idf_version());
+        at_ok(write_bytes);
+        return;
+    }
+
+    if (strcmp(name, "CHIP") == 0) {
+        esp_chip_info_t info;
+        esp_chip_info(&info);
+        char features[128] = "";
+        size_t pos = 0;
+        if (info.features & CHIP_FEATURE_EMB_FLASH) {
+            pos += snprintf(features + pos, sizeof(features) - pos, "%sEMB_FLASH", pos ? "," : "");
+        }
+        if (info.features & CHIP_FEATURE_WIFI_BGN) {
+            pos += snprintf(features + pos, sizeof(features) - pos, "%sWIFI_BGN", pos ? "," : "");
+        }
+        if (info.features & CHIP_FEATURE_BLE) {
+            pos += snprintf(features + pos, sizeof(features) - pos, "%sBLE", pos ? "," : "");
+        }
+        if (info.features & CHIP_FEATURE_BT) {
+            pos += snprintf(features + pos, sizeof(features) - pos, "%sBT", pos ? "," : "");
+        }
+        if (info.features & CHIP_FEATURE_EMB_FLASH) {
+            /* already handled above */
+        }
+        if (pos == 0) {
+            snprintf(features, sizeof(features), "NONE");
+        }
+        at_write_fmt(write_bytes,
+                     "\r\n+CHIP:chip=%s,cores=%u,rev=%u,features=%s\r\n",
+                     chip_model_name(info.model), (unsigned)info.cores, (unsigned)info.revision, features);
+        at_ok(write_bytes);
+        return;
+    }
+
+    if (strcmp(name, "MEM") == 0) {
+        uint32_t flash_size = 0;
+        if (esp_flash_get_size(NULL, &flash_size) != ESP_OK) {
+            flash_size = 0;
+        }
+        size_t psram_size = query_spiram_size();
+        at_write_fmt(write_bytes,
+                     "\r\n+MEM:flash_size=%u,psram_size=%u,psram_present=%u\r\n",
+                     (unsigned)flash_size, (unsigned)psram_size, psram_size > 0 ? 1u : 0u);
+        at_ok(write_bytes);
+        return;
+    }
+
     if (strcmp(name, "RST") == 0) {
         at_ok(write_bytes);
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -240,7 +333,7 @@ static void handle_at_line_inner(const char *line_raw, void (*write_bytes)(const
 
     if (strcmp(name, "CMD") == 0) {
         at_write(write_bytes,
-                 "\r\n+CMD:AT,ATE0,ATE1,AT+GMR,AT+RST,AT+CMD,AT+SYSRAM,AT+ROUTER,AT+PING,AT+MODE,AT+MODEMINFO,AT+W5500,AT+W5500IP,AT+USB4G,AT+USB4GIP,AT+NETCHECK\r\n");
+                 "\r\n+CMD:AT,ATE0,ATE1,AT+GMR,AT+IDF,AT+CHIP,AT+MEM,AT+RST,AT+CMD,AT+TIME,AT+MODEMTIME,AT+SYSRAM,AT+ROUTER,AT+PING,AT+MODE,AT+MODEMINFO,AT+W5500,AT+W5500IP,AT+USB4G,AT+USB4GIP,AT+NETCHECK\r\n");
         at_ok(write_bytes);
         return;
     }
@@ -321,6 +414,18 @@ static void handle_at_line_inner(const char *line_raw, void (*write_bytes)(const
         at_ok(write_bytes);
         return;
     }
+
+    if (strcmp(name, "MODEMTIME") == 0) {
+        char time_str[128] = {0};
+        esp_err_t e = esp_bridge_modem_get_time(time_str, sizeof(time_str));
+        if (e != ESP_OK) {
+            at_error(write_bytes);
+            return;
+        }
+        at_write_fmt(write_bytes, "\r\n+MODEMTIME:%s\r\n", time_str);
+        at_ok(write_bytes);
+        return;
+    }
 #endif
 
     if (strcmp(name, "W5500") == 0) {
@@ -385,11 +490,92 @@ static void handle_at_line_inner(const char *line_raw, void (*write_bytes)(const
         return;
     }
 
+    if (strcmp(name, "TIME") == 0) {
+        const char *q = sub;
+        while (*q && *q != '?' && *q != '=' && *q != ' ' && *q != '\t') {
+            q++;
+        }
+        while (*q == ' ' || *q == '\t') {
+            q++;
+        }
+        if (*q == '?' || *q == '\0') {
+            time_t now = time(NULL);
+            struct tm tm_info;
+            localtime_r(&now, &tm_info);
+            char tbuf[32];
+            strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", &tm_info);
+            at_write_fmt(write_bytes, "\r\n+TIME:local_time=%s\r\n", tbuf);
+            at_ok(write_bytes);
+            return;
+        }
+        if (*q == '=') {
+            q++;
+            skip_sp(&q);
+            bool quoted = false;
+            if (*q == '"') {
+                quoted = true;
+                q++;
+            }
+            char tbuf[64];
+            size_t i = 0;
+            while (*q && *q != '\r' && *q != '\n' && (quoted ? *q != '"' : true) && i + 1 < sizeof(tbuf)) {
+                tbuf[i++] = *q++;
+            }
+            tbuf[i] = '\0';
+            if (tbuf[0] == '\0') {
+                at_error(write_bytes);
+                return;
+            }
+            struct tm tm_info = {0};
+            int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+            if (sscanf(tbuf, "%4d-%2d-%2d %2d:%2d:%2d", &year, &month, &day, &hour, &minute, &second) != 6) {
+                at_error(write_bytes);
+                return;
+            }
+            if (year < 1970 || month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+                at_error(write_bytes);
+                return;
+            }
+            tm_info.tm_year = year - 1900;
+            tm_info.tm_mon = month - 1;
+            tm_info.tm_mday = day;
+            tm_info.tm_hour = hour;
+            tm_info.tm_min = minute;
+            tm_info.tm_sec = second;
+            time_t t = mktime(&tm_info);
+            if (t == (time_t)-1) {
+                at_error(write_bytes);
+                return;
+            }
+            struct timeval tv = {0};
+            tv.tv_sec = t;
+            tv.tv_usec = 0;
+            if (settimeofday(&tv, NULL) != 0) {
+                at_error(write_bytes);
+                return;
+            }
+            at_write_fmt(write_bytes, "\r\n+TIME:ok,local_time=%04d-%02d-%02d %02d:%02d:%02d\r\n",
+                         year, month, day, hour, minute, second);
+            at_ok(write_bytes);
+            return;
+        }
+        at_error(write_bytes);
+        return;
+    }
+
     if (strcmp(name, "SYSRAM") == 0) {
         size_t internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        size_t internal_min = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
         size_t dma = heap_caps_get_free_size(MALLOC_CAP_DMA);
-        char line[96];
-        snprintf(line, sizeof(line), "\r\n+SYSRAM:internal=%u,dma=%u\r\n", (unsigned)internal, (unsigned)dma);
+        size_t dma_min = heap_caps_get_minimum_free_size(MALLOC_CAP_DMA);
+#if defined(CONFIG_SPIRAM) || defined(CONFIG_ESP32_SPIRAM_SUPPORT) || defined(CONFIG_ESP32S3_SPIRAM_SUPPORT)
+        size_t spiram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+#else
+        size_t spiram = 0;
+#endif
+        char line[160];
+        snprintf(line, sizeof(line), "\r\n+SYSRAM:internal_free=%u,internal_min_free=%u,dma_free=%u,dma_min_free=%u,spiram_free=%u\r\n",
+                 (unsigned)internal, (unsigned)internal_min, (unsigned)dma, (unsigned)dma_min, (unsigned)spiram);
         at_write(write_bytes, line);
         at_ok(write_bytes);
         return;

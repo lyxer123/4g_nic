@@ -1,0 +1,9 @@
+pppos\lwip_core.o: ../lwip/src/core/lwip_core.c
+pppos\lwip_core.o: ../lwip/src/include/lwip/opt.h
+pppos\lwip_core.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdint.h
+pppos\lwip_core.o: ../Core/Inc/lwipopts.h
+pppos\lwip_core.o: ../lwip/src/include/lwip/sys.h
+pppos\lwip_core.o: ../lwip/src/include/lwip/inet.h
+pppos\lwip_core.o: ../lwip/src/include/lwip/ip_addr.h
+pppos\lwip_core.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdio.h
+pppos\lwip_core.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\string.h

@@ -136,7 +136,8 @@ static void pcapi_reply_err(int http_status, const char *json_msg)
 static bool pcapi_parse_post_spec(const char *rest, char *path, size_t path_sz, size_t *body_len)
 {
     const char *end = rest + strlen(rest);
-    while (end > rest && (end[-1] == ' ' || end[-1] == '\t')) {
+    /* Trim trailing whitespace, \r, \n */
+    while (end > rest && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) {
         end--;
     }
     const char *last_sp = NULL;
@@ -289,12 +290,62 @@ static void handle_pcapi_from(const char *p)
                 pcapi_reply_err(500, "{\"status\":\"error\",\"message\":\"oom\"}");
                 return;
             }
-            if (read_uart_exact((uint8_t *)body, body_len, PCAPI_BODY_READ_MS) != ESP_OK) {
-                free(body);
-                pcapi_reply_err(408, "{\"status\":\"error\",\"message\":\"post body read timeout\"}");
-                return;
+            /* Small delay to ensure sender has finished transmitting and all bytes are in UART buffer */
+            vTaskDelay(pdMS_TO_TICKS(10));
+            
+            /* Consume any leftover \r\n from the header line */
+            uint8_t ch = 0;
+            int first_byte_consumed = 0;
+            while (uart_read_bytes(UART_CLI_NUM, &ch, 1, pdMS_TO_TICKS(5)) == 1) {
+                if (ch != '\r' && ch != '\n') {
+                    /* Not a line ending, this is the first byte of body */
+                    body[0] = (char)ch;
+                    first_byte_consumed = 1;
+                    ESP_LOGD(TAG, "Got first body byte: 0x%02x", ch);
+                    break;
+                }
+                ESP_LOGD(TAG, "Consumed leftover 0x%02x from header line", ch);
+            }
+            
+            /* Calculate how many bytes we still need to read */
+            size_t already_read = first_byte_consumed ? 1 : 0;
+            size_t remaining = body_len - already_read;
+            
+            if (remaining > 0) {
+                /* Debug: Check how many bytes are available in UART buffer */
+                size_t available_bytes = 0;
+                uart_get_buffered_data_len(UART_CLI_NUM, &available_bytes);
+                ESP_LOGI(TAG, "UART buffer has %u bytes available, need to read %u more bytes (already have %u)", 
+                         (unsigned)available_bytes, (unsigned)remaining, (unsigned)already_read);
+                
+                if (read_uart_exact((uint8_t *)body + already_read, remaining, PCAPI_BODY_READ_MS) != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to read POST body: expected %u bytes, got %u", (unsigned)body_len, (unsigned)already_read);
+                    free(body);
+                    pcapi_reply_err(408, "{\"status\":\"error\",\"message\":\"post body read timeout\"}");
+                    return;
+                }
             }
             body[body_len] = '\0';
+            ESP_LOGI(TAG, "Successfully read POST body[%u]", (unsigned)body_len);
+            /* Print first and last few bytes for debugging */
+            if (body_len > 0) {
+                ESP_LOGI(TAG, "  First 3 bytes: 0x%02x 0x%02x 0x%02x", 
+                         (unsigned char)body[0], 
+                         body_len > 1 ? (unsigned char)body[1] : 0,
+                         body_len > 2 ? (unsigned char)body[2] : 0);
+                ESP_LOGI(TAG, "  Last 3 bytes: 0x%02x 0x%02x 0x%02x",
+                         body_len > 2 ? (unsigned char)body[body_len-3] : 0,
+                         body_len > 1 ? (unsigned char)body[body_len-2] : 0,
+                         (unsigned char)body[body_len-1]);
+                ESP_LOGI(TAG, "  Expected last byte: 0x7d ('}')");
+                ESP_LOGI(TAG, "  Actual last byte: 0x%02x", (unsigned char)body[body_len-1]);
+                if (body[body_len-1] == 0x7d) {
+                    ESP_LOGI(TAG, "  ✓ Last byte is correct!");
+                } else {
+                    ESP_LOGE(TAG, "  ✗ Last byte is WRONG! Expected 0x7d, got 0x%02x", 
+                             (unsigned char)body[body_len-1]);
+                }
+            }
         }
     } else {
         pcapi_reply_err(400, "{\"status\":\"error\",\"message\":\"use PCAPI GET|POST|DELETE\"}");

@@ -378,6 +378,55 @@ esp_err_t esp_bridge_modem_get_info(esp_bridge_modem_info_t *info)
     return ESP_OK;
 }
 
+esp_err_t esp_bridge_modem_get_time(char *time_str, size_t time_str_size)
+{
+    if (!time_str || time_str_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_dce) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!s_modem_lock) {
+        s_modem_lock = xSemaphoreCreateMutex();
+    }
+    if (!s_modem_lock || xSemaphoreTake(s_modem_lock, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t err = ESP_OK;
+    (void)esp_modem_pause_net(s_dce, true);
+    char buf[CONFIG_ESP_MODEM_C_API_STR_MAX] = {0};
+    err = esp_modem_at(s_dce, "AT+CCLK?", buf, 4000);
+    if (err == ESP_OK && buf[0] != '\0') {
+        trim_at_response_line(buf);
+        char *found = strstr(buf, "+CCLK:");
+        if (found) {
+            found += 6;
+            while (*found == ' ' || *found == '\t') {
+                found++;
+            }
+            if (*found == '"') {
+                found++;
+            }
+            char *end = found;
+            while (*end && *end != '"' && *end != '\r' && *end != '\n') {
+                end++;
+            }
+            *end = '\0';
+            snprintf(time_str, time_str_size, "%s", found);
+        } else {
+            snprintf(time_str, time_str_size, "%s", buf);
+        }
+    } else {
+        if (time_str_size > 0) {
+            time_str[0] = '\0';
+        }
+    }
+    (void)esp_modem_pause_net(s_dce, false);
+    xSemaphoreGive(s_modem_lock);
+    return err;
+}
+
 #if (defined(CONFIG_BRIDGE_SERIAL_VIA_USB)) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0))
 #include "esp_modem_usb_c_api.h"
 #include "esp_modem_usb_config.h"

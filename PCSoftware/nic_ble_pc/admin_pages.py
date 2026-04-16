@@ -2120,17 +2120,34 @@ class AdminPages:
         pf.pack(fill=tk.X, pady=(8, 0))
 
         presets = [
+            # 基础指令
             ("AT", "AT"),
+            ("ATE0", "ATE0"),
+            ("ATE1", "ATE1"),
             ("AT+GMR", "AT+GMR"),
+            ("AT+IDF", "AT+IDF"),
+            ("AT+CHIP", "AT+CHIP"),
+            ("AT+MEM", "AT+MEM"),
+            ("AT+RST", "AT+RST"),
             ("AT+CMD", "AT+CMD"),
+            ("AT+TIME", "AT+TIME"),
+            ("AT+SYSRAM", "AT+SYSRAM"),
+            # 路由器相关
             ("AT+ROUTER", "AT+ROUTER"),
-            ("AT+MODE", "AT+MODE"),
+            ("AT+MODE?", "AT+MODE?"),
+            ("AT+PING", "AT+PING"),
+            # 4G模组相关
             ("AT+MODEMINFO", "AT+MODEMINFO"),
+            ("AT+MODEMTIME", "AT+MODEMTIME"),
+            # W5500以太网
             ("AT+W5500", "AT+W5500"),
             ("AT+W5500IP", "AT+W5500IP"),
+            # USB 4G
             ("AT+USB4G", "AT+USB4G"),
             ("AT+USB4GIP", "AT+USB4GIP"),
+            # 网络检测
             ("AT+NETCHECK", "AT+NETCHECK"),
+            # serial_cli命令
             ("modem_info", "modem_info"),
             ("help", "help"),
         ]
@@ -2149,7 +2166,9 @@ class AdminPages:
         ttk.Label(
             fr,
             text="提示：modem_info 走 serial_cli（4G 模组信息）；AT+CMD 列出固件已实现的 AT 子集；"
-            "新增 AT+MODEMINFO、AT+W5500/AT+W5500IP、AT+USB4G/AT+USB4GIP、AT+NETCHECK。"
+            "已实现的 AT 指令包括：AT, ATE0/1, AT+GMR, AT+IDF, AT+CHIP, AT+MEM, AT+RST, AT+CMD, "
+            "AT+TIME(查询/设置), AT+SYSRAM, AT+ROUTER, AT+MODE(查询/设置), AT+PING, "
+            "AT+MODEMINFO, AT+MODEMTIME, AT+W5500, AT+W5500IP, AT+USB4G, AT+USB4GIP, AT+NETCHECK。"
             "若 UART 与日志控制台共用，仅「像 AT 的一整行」会进 router_at。",
             foreground="gray",
             wraplength=640,

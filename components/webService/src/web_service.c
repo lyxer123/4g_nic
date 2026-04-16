@@ -1797,13 +1797,24 @@ static esp_err_t uri_wifi_ap_post(httpd_req_t *req)
 {
     char *body = http_recv_body(req, 1024);
     if (!body) {
+        ESP_LOGE(TAG, "wifi_ap_post: failed to receive body");
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid body\"}");
     }
+    ESP_LOGI(TAG, "wifi_ap_post: received body[%d]", (int)req->content_len);
+    /* Print hex dump for debugging */
+    if (req->content_len > 0) {
+        int print_len = req->content_len < 128 ? req->content_len : 128;
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, body, print_len, ESP_LOG_INFO);
+    }
     cJSON *root = cJSON_Parse(body);
-    free(body);
     if (!root) {
+        const char *err_ptr = cJSON_GetErrorPtr();
+        ESP_LOGE(TAG, "wifi_ap_post: JSON parse failed at: %s", err_ptr ? err_ptr : "unknown");
+        ESP_LOGE(TAG, "wifi_ap_post: raw body len=%d", (int)req->content_len);
+        free(body);
         return send_json(req, 400, "{\"status\":\"error\",\"message\":\"invalid json\"}");
     }
+    free(body);
     wifi_config_t wcfg = {0};
     esp_wifi_get_config(WIFI_IF_AP, &wcfg);
 

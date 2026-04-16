@@ -119,6 +119,9 @@ idf.py app-flash monitor
 | [`调试.md`](调试.md) | 问题排查：PHY 复位、PPP `pppos_input_tcpip`、SoftAP 踢站、多 WAN 行为等。 |
 | [`doc/命令.md`](doc/命令.md) | 串口 CLI 与 PCAPI；BLE JSON 摘要。 |
 | [`doc/ble_protocol.md`](doc/ble_protocol.md) / [`doc/ble_protocolcn.md`](doc/ble_protocolcn.md) | BLE 特征与命令表。 |
+| [`PCSoftware/AT指令说明.md`](PCSoftware/AT指令说明.md) | ESP32-S3 路由器固件实现的 AT 指令集说明。 |
+| [`at指令实现.md`](at指令实现.md) | AT 指令架构设计与实现规划评估。 |
+| [`at指令说明.md`](at指令说明.md) | 乐鑫官方 ESP-AT 指令集参考（中文）。 |
 | [`PCSoftware/README.md`](PCSoftware/README.md) | PC 串口管理工具与 **exe 打包**。 |
 | [`app/README.md`](app/README.md) | Flutter BLE 工程说明。 |
 

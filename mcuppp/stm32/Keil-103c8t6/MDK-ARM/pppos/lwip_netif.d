@@ -1,0 +1,13 @@
+pppos\lwip_netif.o: ../lwip/src/netif/lwip_netif.c
+pppos\lwip_netif.o: ../lwip/src/include/lwip/netif.h
+pppos\lwip_netif.o: ../lwip/src/include/lwip/ip_addr.h
+pppos\lwip_netif.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdint.h
+pppos\lwip_netif.o: ../lwip/src/include/lwip/raw.h
+pppos\lwip_netif.o: ../lwip/src/include/lwip/opt.h
+pppos\lwip_netif.o: ../Core/Inc/lwipopts.h
+pppos\lwip_netif.o: ../lwip/src/include/lwip/sys.h
+pppos\lwip_netif.o: ../lwip/src/include/lwip/pbuf.h
+pppos\lwip_netif.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stddef.h
+pppos\lwip_netif.o: ../lwip/src/include/lwip/err.h
+pppos\lwip_netif.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdlib.h
+pppos\lwip_netif.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\string.h

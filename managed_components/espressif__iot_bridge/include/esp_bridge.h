@@ -69,6 +69,20 @@ esp_netif_t *esp_bridge_create_modem_netif(esp_netif_ip_info_t *ip_info, uint8_t
  *      - ESP_ERR_INVALID_STATE: modem DCE not created yet
  */
 esp_err_t esp_bridge_modem_get_info(esp_bridge_modem_info_t *info);
+
+/**
+ * @brief Query modem clock from the attached 4G modem.
+ *
+ * @param[out] time_str output buffer for modem time response
+ * @param[in] time_str_size size of output buffer
+ *
+ * @return
+ *      - ESP_OK: query succeeded and time string was filled
+ *      - ESP_ERR_INVALID_ARG: invalid argument
+ *      - ESP_ERR_INVALID_STATE: modem DCE not created yet
+ *      - ESP_ERR_TIMEOUT: modem lock could not be acquired
+ */
+esp_err_t esp_bridge_modem_get_time(char *time_str, size_t time_str_size);
 #endif
 
 #if defined(CONFIG_BRIDGE_EXTERNAL_NETIF_STATION)

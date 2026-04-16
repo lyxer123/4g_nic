@@ -1,3 +1,3 @@
-idf_component_register(SRCS "main.c"
-                       INCLUDE_DIRS "main"
-                       REQUIRES esp_netif esp_event driver)
+cmake_minimum_required(VERSION 3.20)
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(pppos_client)

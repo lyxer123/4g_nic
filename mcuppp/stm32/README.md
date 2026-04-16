@@ -19,7 +19,7 @@
 2. 添加 HAL、CMSIS、lwIP/PPP 组件。
 3. 配置 `UART2` 的 TX/RX 引脚与路由器 PPP UART 连接。
 4. 编译并下载。
-
+> 本目录提供了 `mcuppp/stm32/Keil/STM32F407_PPP.uvprojx` Keil 项目文件，可直接打开并在 MDK 中编译。
 ## 功能
 
 - 建立串口 PPP 连接

@@ -206,10 +206,16 @@ class SerialMux:
         with self._send_lock:
             self._pending = resp_q
             try:
+                # 先发送PCAPI header行
                 self._ser.write(line.encode("utf-8"))
+                self._ser.flush()  # 确保header完全发送
+                # 发送body前延迟，确保固件端已完全接收并处理header
+                # 115200bps下，传输121字节约需10ms，给更多余量
                 if method == "POST" and body and len(body) > 0:
+                    time.sleep(0.05)  # 50ms延迟，确保固件端准备好接收body
                     self._ser.write(body)
-                self._ser.flush()
+                    self._ser.flush()  # 确保body完全发送
+                    time.sleep(0.02)  # 再等待20ms确保数据完全到达设备
                 try:
                     st, data = resp_q.get(timeout=tmo)
                 except queue.Empty as e:

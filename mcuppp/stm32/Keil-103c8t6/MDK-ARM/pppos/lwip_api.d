@@ -1,0 +1,10 @@
+pppos\lwip_api.o: ../lwip/src/api/lwip_api.c
+pppos\lwip_api.o: ../lwip/src/include/lwip/opt.h
+pppos\lwip_api.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdint.h
+pppos\lwip_api.o: ../Core/Inc/lwipopts.h
+pppos\lwip_api.o: ../lwip/src/include/lwip/sys.h
+pppos\lwip_api.o: ../lwip/src/include/lwip/netdb.h
+pppos\lwip_api.o: ../lwip/src/include/lwip/sockets.h
+pppos\lwip_api.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stddef.h
+pppos\lwip_api.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdlib.h
+pppos\lwip_api.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\string.h

@@ -4,9 +4,15 @@
 
 - `esp32/arduino`：Arduino 环境下的串口 PPP 传输示例。
 - `esp32/esp-idf`：ESP-IDF 环境下的 PPP 客户端示例。
-- `stm32/`：Keil/STM32Cube 下的 STM32 UART PPP 客户端示例。
+- `stm32/Keil`：Keil/STM32Cube 下的 STM32 UART PPP 客户端示例。
+- `stm32/arduino`：STM32 Arduino 串口 PPP 传输示例。
+- `stm32/cubemx`：STM32CubeMX/STM32CubeIDE 可直接导入的 STM32F103 PPP 示例。
+- `avr/`：AVR Arduino PPP UART 传输示例。
+- `pic/`：Microchip PIC UART PPP 客户端示例。
+- `nrf52/`：nRF52 Arduino PPP UART 传输示例。
 - `rp2040/`：RP2040 Arduino PPP UART 传输示例。
 - `rp2350/`：RP2350 Arduino PPP UART 传输示例。
+- `generic_ppp/`：通用 lwIP PPP 客户端示例，展示 PPP 建连后 HTTP GET 测试。
 
 ## 说明
 
