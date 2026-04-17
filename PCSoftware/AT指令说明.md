@@ -36,8 +36,8 @@
 | 指令 | 类型 | 说明 | 示例响应 |
 |------|------|------|----------|
 | `AT+ROUTER` | 查询 | 查询路由器 UART 配置信息 | `+ROUTER:uart=x,shared=x,baud=115200,...` |
-| `AT+MODE` | 查询 | 查询当前工作模式 | `+MODE:work_mode_id=x` |
-| `AT+MODE=<id>` | 设置 | 设置工作模式 | `AT+MODE=1` |
+| `AT+MODE?` | 查询 | 查询当前工作模式 | `+MODE?:work_mode_id=x` |
+| `AT+MODESET=<id>` | 设置 | 设置工作模式（**新**） | `AT+MODESET=0` → 显示配置提示 |
 | `AT+PING` | 执行 | Ping 测试（设备级） | `+PING:ok cmd=ping device=4g_nic` |
 
 ## 4G 模组相关指令

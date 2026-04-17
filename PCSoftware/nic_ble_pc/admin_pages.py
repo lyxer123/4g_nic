@@ -2135,6 +2135,10 @@ class AdminPages:
             # 路由器相关
             ("AT+ROUTER", "AT+ROUTER"),
             ("AT+MODE?", "AT+MODE?"),
+            ("AT+MODESET=0", "AT+MODESET=0"),
+            ("AT+MODESET=1", "AT+MODESET=1"),
+            ("AT+MODESET=2", "AT+MODESET=2"),
+            ("AT+MODESET=3", "AT+MODESET=3"),
             ("AT+PING", "AT+PING"),
             # 4G模组相关
             ("AT+MODEMINFO", "AT+MODEMINFO"),
@@ -2147,6 +2151,9 @@ class AdminPages:
             ("AT+USB4GIP", "AT+USB4GIP"),
             # 网络检测
             ("AT+NETCHECK", "AT+NETCHECK"),
+            # WiFi配置（新增）
+            ("AT+WIFISCAN", "AT+WIFISCAN"),
+            ("AT+WIFISTA?", "AT+WIFISTA?"),
             # serial_cli命令
             ("modem_info", "modem_info"),
             ("help", "help"),

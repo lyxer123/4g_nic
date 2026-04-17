@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "F:/github/4g_nic/spiNetwork/esp32_wroom_host/build/CMakeFiles/bootloader"
+		},
+		{
+			"file" : "F:/github/4g_nic/spiNetwork/esp32_wroom_host/build/CMakeFiles/bootloader.rule"
+		},
+		{
+			"file" : "F:/github/4g_nic/spiNetwork/esp32_wroom_host/build/CMakeFiles/bootloader-complete.rule"
+		},
+		{
+			"file" : "F:/github/4g_nic/spiNetwork/esp32_wroom_host/build/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule"
+		},
+		{
+			"file" : "F:/github/4g_nic/spiNetwork/esp32_wroom_host/build/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule"
+		},
+		{
+			"file" : "F:/github/4g_nic/spiNetwork/esp32_wroom_host/build/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule"
+		},
+		{
+			"file" : "F:/github/4g_nic/spiNetwork/esp32_wroom_host/build/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule"
+		},
+		{
+			"file" : "F:/github/4g_nic/spiNetwork/esp32_wroom_host/build/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule"
+		},
+		{
+			"file" : "F:/github/4g_nic/spiNetwork/esp32_wroom_host/build/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule"
+		},
+		{
+			"file" : "F:/github/4g_nic/spiNetwork/esp32_wroom_host/build/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"bootloader"
+		],
+		"name" : "bootloader"
+	}
+}

@@ -1,0 +1,2 @@
+source F:/github/4g_nic/spiNetwork/esp32_wroom_host/build/gdbinit/symbols
+source F:/github/4g_nic/spiNetwork/esp32_wroom_host/build/gdbinit/connect

@@ -23,11 +23,13 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_system.h"
+#include "esp_wifi.h"
 #include "esp_bridge.h"
 #include <sys/time.h>
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 #include "nvs.h"
 #include "sdkconfig.h"
 
@@ -333,7 +335,7 @@ static void handle_at_line_inner(const char *line_raw, void (*write_bytes)(const
 
     if (strcmp(name, "CMD") == 0) {
         at_write(write_bytes,
-                 "\r\n+CMD:AT,ATE0,ATE1,AT+GMR,AT+IDF,AT+CHIP,AT+MEM,AT+RST,AT+CMD,AT+TIME,AT+MODEMTIME,AT+SYSRAM,AT+ROUTER,AT+PING,AT+MODE,AT+MODEMINFO,AT+W5500,AT+W5500IP,AT+USB4G,AT+USB4GIP,AT+NETCHECK\r\n");
+                 "\r\n+CMD:AT,ATE0,ATE1,AT+GMR,AT+IDF,AT+CHIP,AT+MEM,AT+RST,AT+CMD,AT+TIME,AT+MODEMTIME,AT+SYSRAM,AT+ROUTER,AT+PING,AT+MODE?,AT+MODESET,AT+MODEMINFO,AT+W5500,AT+W5500IP,AT+USB4G,AT+USB4GIP,AT+NETCHECK,AT+WIFISCAN,AT+WIFISTA\r\n");
         at_ok(write_bytes);
         return;
     }
@@ -344,48 +346,81 @@ static void handle_at_line_inner(const char *line_raw, void (*write_bytes)(const
         return;
     }
 
-    if (strcmp(name, "MODE") == 0) {
+    if (strcmp(name, "MODE?") == 0 || strcmp(name, "MODE") == 0) {
+        /* AT+MODE? - Query work mode */
+        uint8_t m = 0;
+        esp_err_t e = web_service_get_work_mode_u8(&m);
+        if (e != ESP_OK) {
+            at_error(write_bytes);
+            return;
+        }
+        at_write_fmt(write_bytes, "\r\n+MODE?:work_mode_id=%u\r\n", (unsigned)m);
+        at_ok(write_bytes);
+        return;
+    }
+
+    if (strcmp(name, "MODESET") == 0) {
+        /* AT+MODESET=<id> - Set and save work mode */
         const char *q = sub;
-        while (*q && *q != '?' && *q != '=' && *q != ' ' && *q != '\t') {
+        while (*q && *q != '=' && *q != ' ' && *q != '\t') {
             q++;
         }
         while (*q == ' ' || *q == '\t') {
             q++;
         }
-        if (*q == '?' || *q == '\0') {
-            uint8_t m = 0;
-            esp_err_t e = web_service_get_work_mode_u8(&m);
-            if (e != ESP_OK) {
-                at_error(write_bytes);
-                return;
-            }
-            at_write_fmt(write_bytes, "\r\n+MODE:work_mode_id=%u\r\n", (unsigned)m);
-            at_ok(write_bytes);
+        
+        if (*q != '=') {
+            at_error(write_bytes);
             return;
         }
-        if (*q == '=') {
-            q++;
-            skip_sp(&q);
-            if (*q == '\0') {
-                at_error(write_bytes);
-                return;
-            }
-            char *endptr = NULL;
-            long v = strtol(q, &endptr, 10);
-            if (endptr == q || v < 0 || v > 255) {
-                at_error(write_bytes);
-                return;
-            }
-            esp_err_t e = web_service_apply_work_mode_id((uint8_t)v);
-            if (e != ESP_OK) {
-                at_error(write_bytes);
-                return;
-            }
-            at_write_fmt(write_bytes, "\r\n+MODE:ok work_mode_id=%u\r\n", (unsigned)v);
-            at_ok(write_bytes);
+        
+        q++;  // skip '='
+        skip_sp(&q);
+        
+        if (*q == '\0') {
+            at_error(write_bytes);
             return;
         }
-        at_error(write_bytes);
+        
+        char *endptr = NULL;
+        long v = strtol(q, &endptr, 10);
+        if (endptr == q || v < 0 || v > 255) {
+            at_error(write_bytes);
+            return;
+        }
+        
+        esp_err_t e = web_service_apply_work_mode_id((uint8_t)v);
+        if (e != ESP_OK) {
+            at_error(write_bytes);
+            return;
+        }
+        
+        /* Show configuration hints based on mode */
+        at_write_fmt(write_bytes, "\r\n+MODESET:ok work_mode_id=%u\r\n", (unsigned)v);
+        
+        /* Mode-specific configuration hints */
+        switch ((uint8_t)v) {
+            case 0:  // WiFi Router Mode
+                at_write(write_bytes, "+MODESET:hint=WiFi STA WAN + SoftAP LAN\r\n");
+                at_write(write_bytes, "+MODESET:hint=Use AT+WIFISTA to configure STA\r\n");
+                break;
+            case 1:  // Ethernet Router Mode (W5500)
+                at_write(write_bytes, "+MODESET:hint=W5500 Ethernet WAN + SoftAP LAN\r\n");
+                at_write(write_bytes, "+MODESET:hint=W5500 will auto-configure via DHCP\r\n");
+                break;
+            case 2:  // USB 4G Router Mode
+                at_write(write_bytes, "+MODESET:hint=USB CAT1 4G WAN + SoftAP LAN\r\n");
+                at_write(write_bytes, "+MODESET:hint=USB 4G modem will auto-connect\r\n");
+                break;
+            case 3:  // PPP 4G Router Mode
+                at_write(write_bytes, "+MODESET:hint=PPP 4G WAN + SoftAP LAN\r\n");
+                at_write(write_bytes, "+MODESET:hint=4G modem will auto-connect via PPP\r\n");
+                break;
+            default:
+                break;
+        }
+        
+        at_ok(write_bytes);
         return;
     }
 
@@ -580,6 +615,190 @@ static void handle_at_line_inner(const char *line_raw, void (*write_bytes)(const
                  (unsigned)internal, (unsigned)internal_min, (unsigned)dma, (unsigned)dma_min, (unsigned)spiram);
         at_write(write_bytes, line);
         at_ok(write_bytes);
+        return;
+    }
+
+    if (strcmp(name, "WIFISCAN") == 0) {
+        /* AT+WIFISCAN - Scan for available WiFi networks */
+        wifi_ap_record_t ap_records[20];
+        uint16_t ap_count = 20;
+        
+        /* Initialize WiFi if needed */
+        wifi_mode_t mode;
+        esp_err_t err = esp_wifi_get_mode(&mode);
+        if (err == ESP_ERR_WIFI_NOT_INIT) {
+            wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+            if (esp_wifi_init(&cfg) != ESP_OK) {
+                at_error(write_bytes);
+                return;
+            }
+            esp_wifi_set_mode(WIFI_MODE_STA);
+            esp_wifi_start();
+        }
+        
+        /* Perform scan */
+        err = esp_wifi_scan_start(NULL, true);  // blocking scan
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "WiFi scan failed: %s", esp_err_to_name(err));
+            at_error(write_bytes);
+            return;
+        }
+        
+        /* Get scan results */
+        err = esp_wifi_scan_get_ap_records(&ap_count, ap_records);
+        if (err != ESP_OK) {
+            at_error(write_bytes);
+            return;
+        }
+        
+        /* Print results */
+        at_write_fmt(write_bytes, "\r\n+WIFISCAN:found=%u\r\n", ap_count);
+        for (uint16_t i = 0; i < ap_count; i++) {
+            char ssid[33];
+            memcpy(ssid, ap_records[i].ssid, 32);
+            ssid[32] = '\0';
+            
+            const char *auth_mode = "UNKNOWN";
+            switch (ap_records[i].authmode) {
+                case WIFI_AUTH_OPEN: auth_mode = "OPEN"; break;
+                case WIFI_AUTH_WEP: auth_mode = "WEP"; break;
+                case WIFI_AUTH_WPA_PSK: auth_mode = "WPA-PSK"; break;
+                case WIFI_AUTH_WPA2_PSK: auth_mode = "WPA2-PSK"; break;
+                case WIFI_AUTH_WPA_WPA2_PSK: auth_mode = "WPA/WPA2-PSK"; break;
+                case WIFI_AUTH_WPA2_WPA3_PSK: auth_mode = "WPA2/WPA3-PSK"; break;
+                case WIFI_AUTH_WAPI_PSK: auth_mode = "WAPI-PSK"; break;
+                default: auth_mode = "OTHER"; break;
+            }
+            
+            at_write_fmt(write_bytes, "+WIFISCAN:%u,\"%s\",%d,%s,%d\r\n",
+                         i,
+                         ssid,
+                         ap_records[i].rssi,
+                         auth_mode,
+                         ap_records[i].primary);
+        }
+        at_ok(write_bytes);
+        return;
+    }
+
+    if (strcmp(name, "WIFISTA") == 0) {
+        /* AT+WIFISTA - Configure WiFi STA mode */
+        const char *q = sub;
+        while (*q && *q != '?' && *q != '=' && *q != ' ' && *q != '\t') {
+            q++;
+        }
+        while (*q == ' ' || *q == '\t') {
+            q++;
+        }
+        
+        /* Query mode: AT+WIFISTA? */
+        if (*q == '?' || *q == '\0') {
+            nvs_handle_t nvs;
+            char ssid[64] = {0};
+            char pwd[64] = {0};
+            size_t len = sizeof(ssid);
+            
+            esp_err_t e = nvs_open("wifi_cfg", NVS_READONLY, &nvs);
+            if (e == ESP_OK) {
+                nvs_get_str(nvs, "sta_ssid", ssid, &len);
+                len = sizeof(pwd);
+                nvs_get_str(nvs, "sta_pwd", pwd, &len);
+                nvs_close(nvs);
+            }
+            
+            if (ssid[0] != '\0') {
+                at_write_fmt(write_bytes, "\r\n+WIFISTA:ssid=\"%s\",password=\"%s\"\r\n", ssid, pwd);
+            } else {
+                at_write(write_bytes, "\r\n+WIFISTA:not configured\r\n");
+            }
+            at_ok(write_bytes);
+            return;
+        }
+        
+        /* Set mode: AT+WIFISTA=<ssid>,<password> */
+        if (*q == '=') {
+            q++;
+            skip_sp(&q);
+            
+            /* Parse: "ssid","password" or ssid,password */
+            char ssid[64] = {0};
+            char password[64] = {0};
+            
+            /* Extract SSID */
+            const char *ssid_start = q;
+            if (*q == '"') {
+                ssid_start = ++q;  // skip opening quote
+                while (*q && *q != '"') q++;
+            } else {
+                while (*q && *q != ',') q++;
+            }
+            size_t ssid_len = q - ssid_start;
+            if (ssid_len >= sizeof(ssid)) ssid_len = sizeof(ssid) - 1;
+            memcpy(ssid, ssid_start, ssid_len);
+            ssid[ssid_len] = '\0';
+            
+            /* Skip comma */
+            if (*q == ',') q++;
+            
+            /* Extract password */
+            const char *pwd_start = q;
+            if (*q == '"') {
+                pwd_start = ++q;  // skip opening quote
+                while (*q && *q != '"') q++;
+            } else {
+                while (*q) q++;
+            }
+            size_t pwd_len = q - pwd_start;
+            if (pwd_len >= sizeof(password)) pwd_len = sizeof(password) - 1;
+            memcpy(password, pwd_start, pwd_len);
+            password[pwd_len] = '\0';
+            
+            /* Validate */
+            if (strlen(ssid) == 0 || strlen(ssid) > 32) {
+                at_error(write_bytes);
+                return;
+            }
+            if (strlen(password) > 64) {
+                at_error(write_bytes);
+                return;
+            }
+            
+            /* Save to NVS */
+            nvs_handle_t nvs;
+            esp_err_t e = nvs_open("wifi_cfg", NVS_READWRITE, &nvs);
+            if (e != ESP_OK) {
+                at_error(write_bytes);
+                return;
+            }
+            
+            e = nvs_set_str(nvs, "sta_ssid", ssid);
+            if (e != ESP_OK) {
+                nvs_close(nvs);
+                at_error(write_bytes);
+                return;
+            }
+            
+            e = nvs_set_str(nvs, "sta_pwd", password);
+            if (e != ESP_OK) {
+                nvs_close(nvs);
+                at_error(write_bytes);
+                return;
+            }
+            
+            e = nvs_commit(nvs);
+            nvs_close(nvs);
+            
+            if (e != ESP_OK) {
+                at_error(write_bytes);
+                return;
+            }
+            
+            at_write_fmt(write_bytes, "\r\n+WIFISTA:ok,ssid=\"%s\"\r\n", ssid);
+            at_ok(write_bytes);
+            return;
+        }
+        
+        at_error(write_bytes);
         return;
     }
 
