@@ -2042,6 +2042,16 @@ static esp_err_t uri_system_sync_time_post(httpd_req_t *req)
     double ms = ts->valuedouble;
     tv.tv_sec = (time_t)(ms / 1000.0);
     tv.tv_usec = (suseconds_t)((long long)ms % 1000LL) * 1000;
+    
+    /* Debug: log the received timestamp and converted time */
+    time_t recv_time = tv.tv_sec;
+    struct tm tm_info;
+    localtime_r(&recv_time, &tm_info);
+    ESP_LOGI(TAG, "[TIME] Received timestamp: %.0f ms", ms);
+    ESP_LOGI(TAG, "[TIME] Converted to: %04d-%02d-%02d %02d:%02d:%02d",
+             tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
+             tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
+    
     settimeofday(&tv, NULL);
     cJSON_Delete(root);
     log_ring_fmt("[TIME] time synced from browser");

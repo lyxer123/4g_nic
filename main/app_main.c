@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <stdlib.h>
+#include <time.h>
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
@@ -37,6 +39,12 @@ static esp_err_t esp_storage_init(void)
 
 void app_main(void)
 {
+    /* Set timezone to China Standard Time (UTC+8)
+     * POSIX format: CST-8 means "China Standard Time is 8 hours EAST of UTC"
+     * The negative sign indicates east of Greenwich */
+    setenv("TZ", "CST-8", 1);
+    tzset();
+    
     esp_storage_init();
 
     /* Init and register system/core components */

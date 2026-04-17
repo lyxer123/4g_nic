@@ -422,6 +422,8 @@ static void handle_at_line_inner(const char *line_raw, void (*write_bytes)(const
             at_error(write_bytes);
             return;
         }
+        /* Modem already returns time with timezone info (e.g., +32 = UTC+8)
+         * Just return it as-is */
         at_write_fmt(write_bytes, "\r\n+MODEMTIME:%s\r\n", time_str);
         at_ok(write_bytes);
         return;
