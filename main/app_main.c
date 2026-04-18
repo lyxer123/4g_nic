@@ -9,7 +9,9 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
+#include "esp_log.h"
 #include "esp_event.h"
+#include "esp_http_server.h"  // For ESP_ERR_HTTPD_TASK
 
 #include "web_service.h"
 #include "serial_cli.h"
@@ -22,6 +24,8 @@
 #include "system_sta_baidu_probe.h"
 #include "system_eth_uplink_debug.h"
 #include "system_stability.h"
+
+static const char *TAG = "app_main";
 
 static esp_err_t esp_storage_init(void)
 {
@@ -63,7 +67,21 @@ void app_main(void)
     system_sta_baidu_probe_init();
     system_eth_uplink_debug_init();
     (void)system_stability_init();
-    ESP_ERROR_CHECK(web_service_start());
+
+    // 打印启动前内存状态
+    ESP_LOGI(TAG, "Heap before web start: free=%u, min=%u",
+             (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size());
+
+    esp_err_t ret = web_service_start();
+    if (ret == ESP_ERR_HTTPD_TASK) {
+        // HTTP任务创建失败，可能是内存不足或重复启动
+        ESP_LOGW(TAG, "Web service task creation failed, continuing without web interface");
+    } else if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Web service start failed: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Web service started successfully");
+    }
+
     serial_cli_start();
     router_at_start();
     router_ppp_start();

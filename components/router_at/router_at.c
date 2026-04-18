@@ -13,9 +13,7 @@
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
-#if defined(CONFIG_SPIRAM) || defined(CONFIG_ESP32_SPIRAM_SUPPORT) || defined(CONFIG_ESP32S3_SPIRAM_SUPPORT)
-#include "esp_spiram.h"
-#endif
+/* PSRAM functions available via esp_heap_caps.h which is already included */
 #include "esp_idf_version.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
@@ -185,10 +183,10 @@ static bool parse_plus_name(const char *after_plus, char *out_sub, size_t out_sz
     return i > 0;
 }
 
-static size_t query_spiram_size(void)
+static size_t query_psram_size(void)
 {
 #if defined(CONFIG_SPIRAM) || defined(CONFIG_ESP32_SPIRAM_SUPPORT) || defined(CONFIG_ESP32S3_SPIRAM_SUPPORT)
-    return esp_spiram_get_size();
+    return heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 #else
     return 0;
 #endif
@@ -318,7 +316,7 @@ static void handle_at_line_inner(const char *line_raw, void (*write_bytes)(const
         if (esp_flash_get_size(NULL, &flash_size) != ESP_OK) {
             flash_size = 0;
         }
-        size_t psram_size = query_spiram_size();
+        size_t psram_size = query_psram_size();
         at_write_fmt(write_bytes,
                      "\r\n+MEM:flash_size=%u,psram_size=%u,psram_present=%u\r\n",
                      (unsigned)flash_size, (unsigned)psram_size, psram_size > 0 ? 1u : 0u);

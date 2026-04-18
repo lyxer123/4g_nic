@@ -508,8 +508,8 @@ static esp_err_t uart_cli_ensure_driver(void)
         .source_clk = UART_SCLK_DEFAULT,
     };
 
-    /* RX 加大：WiFi 扫描时日志多，避免冲掉下一行 PCAPI 命令头 */
-    esp_err_t e = uart_driver_install(UART_CLI_NUM, 16384, 4096, 0, NULL, 0);
+    /* Reduced buffer size for memory-constrained systems */
+    esp_err_t e = uart_driver_install(UART_CLI_NUM, 2048, 1024, 0, NULL, 0);
     if (e == ESP_ERR_INVALID_STATE) {
         return uart_is_driver_installed(UART_CLI_NUM) ? ESP_OK : e;
     }
@@ -637,9 +637,9 @@ void serial_cli_start(void)
         }
     }
 
-    if (xTaskCreate(uart_cli_task, "uart_cli", 12288, NULL, 4, NULL) != pdPASS) {
+    if (xTaskCreate(uart_cli_task, "uart_cli", 6144, NULL, 4, NULL) != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreate uart_cli failed");
         return;
     }
-    ESP_LOGI(TAG, "UART line CLI task started (no REPL; avoids log/uart reentrancy)");
+    ESP_LOGI(TAG, "UART line CLI task started (stack=6KB)");
 }
