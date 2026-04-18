@@ -2604,6 +2604,13 @@ esp_err_t web_service_start(void)
 {
     if (s_running) return ESP_OK;
 
+    const size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* With SPIRAM_USE_MEMMAP, WiFi/lwIP stay in internal DRAM; 12KB httpd stack + server structs need headroom. */
+    if (internal_free < 28 * 1024) {
+        ESP_LOGW(TAG, "skip web UI: internal_free=%u (<28KiB; raise IDF+SPIRAM_MALLOC or trim WiFi/LwIP)", (unsigned)internal_free);
+        return ESP_ERR_NO_MEM;
+    }
+
     const esp_vfs_littlefs_conf_t conf = {
         .base_path = "/www",
         .partition_label = "www",
@@ -2615,9 +2622,17 @@ esp_err_t web_service_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.max_uri_handlers = 56;
-    /* Default ~4KB stack is too small for scan + LittleFS + TLS-style call depth */
-    config.stack_size = 12288;
+    if (internal_free >= 110 * 1024) {
+        config.stack_size = 12288;
+    } else if (internal_free >= 75 * 1024) {
+        config.stack_size = 8192;
+    } else if (internal_free >= 48 * 1024) {
+        config.stack_size = 6144;
+    } else {
+        config.stack_size = 4096;
+    }
     config.task_priority = 5;
+    ESP_LOGI(TAG, "httpd internal_free=%u stack_size=%u", (unsigned)internal_free, (unsigned)config.stack_size);
 
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &config), TAG, "httpd start failed");
     ESP_RETURN_ON_ERROR(register_handlers(s_server), TAG, "register handlers failed");

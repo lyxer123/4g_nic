@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -17,12 +18,19 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
-#include "esp_eth.h"
 #include "lwip/lwip_napt.h"
 #include <endian.h>
 #include "spi_config.h"
+#include "esp_hosted_spi_proto.h"
 #include "esp_http_client.h"
 #include "esp_event.h"
+#include "esp_rom_sys.h"
+#include "lwip/esp_netif_net_stack.h"
+#include "lwip/ip_addr.h"
+#include "lwip/inet.h"
+#include "lwip/netdb.h"
+#include "lwip/sockets.h"
+#include "ping/ping_sock.h"
 
 #define MAX_PRIORITY_QUEUES 3
 
@@ -43,9 +51,15 @@ static const char *TAG = "spi_host_irq";
 // SPI设备句柄
 static spi_device_handle_t spi_handle = NULL;
 
-// 网络接口
+// 网络接口（SPI 收包在独立任务里 esp_netif_receive，避免与 spi_mutex 死锁）
 static esp_netif_t *eth_netif = NULL;
-static esp_eth_handle_t eth_handle = NULL;
+
+typedef struct {
+    uint8_t *payload;
+    uint16_t len;
+} eth_rx_msg_t;
+
+static QueueHandle_t s_eth_rxq;
 
 // 统计
 static struct {
@@ -59,6 +73,8 @@ static struct {
     uint32_t spi_trans_errors;
     uint32_t invalid_packets;
     uint32_t interrupts_count;
+    uint32_t skip_hs_low;
+    uint32_t rx_dummy;
 } stats = {0};
 
 static uint16_t sequence_num = 0;
@@ -70,17 +86,6 @@ static volatile bool data_path_open = false;
 static volatile bool tx_paused = false;
 static volatile uint32_t tx_pending = 0;
 static SemaphoreHandle_t tx_flow_sem = NULL;
-
-// ESP Payload Header
-struct esp_payload_header {
-    uint8_t  if_type;
-    uint8_t  if_num;
-    uint16_t len;
-    uint16_t offset;
-    uint16_t checksum;
-    uint16_t seq_num;
-    uint8_t  flags;
-} __attribute__((packed));
 
 // 接口类型
 #define ESP_STA_IF          0x00
@@ -101,6 +106,39 @@ static uint16_t compute_checksum(uint8_t *data, uint16_t len)
         checksum += data[i];
     }
     return checksum;
+}
+
+/* 与从机 process_spi_rx / network_adapter 判定一致；dummy(if_type==0xF,len==0) 返回 false */
+static bool hosted_rx_frame_valid(uint8_t *rx_buf, uint16_t *out_payload_len)
+{
+    struct esp_payload_header *h = (struct esp_payload_header *)rx_buf;
+    uint16_t len = le16toh(h->len);
+    uint16_t offset = le16toh(h->offset);
+
+    if (h->if_type == ESP_HOSTED_DUMMY_IF_TYPE || len == 0) {
+        return false;
+    }
+    if (h->if_type != ESP_STA_IF && h->if_type != ESP_AP_IF && h->if_type != ESP_SERIAL_IF &&
+        h->if_type != ESP_HCI_IF) {
+        return false;
+    }
+    if (offset < sizeof(struct esp_payload_header) || (uint32_t)offset + (uint32_t)len > SPI_BUFFER_SIZE) {
+        return false;
+    }
+    /* 从机默认 CONFIG_ESP_SPI_CHECKSUM=n 时 header->checksum 恒为 0，不做验证（见 spi_slave_api process_spi_rx） */
+    uint16_t rx_checksum = le16toh(h->checksum);
+    if (rx_checksum != 0) {
+        uint16_t stor = h->checksum;
+        h->checksum = 0;
+        uint16_t calc = compute_checksum(rx_buf, offset + len);
+        h->checksum = stor;
+        if (calc != rx_checksum) {
+            stats.checksum_errors++;
+            return false;
+        }
+    }
+    *out_payload_len = len;
+    return true;
 }
 
 // 缓冲区池
@@ -273,7 +311,7 @@ static void esp_tx_pause(void)
 {
     if (!tx_paused) {
         tx_paused = true;
-        ESP_LOGW(TAG, "TX paused (pending=%lu)", tx_pending);
+        ESP_LOGW(TAG, "TX paused (pending=%lu)", (unsigned long)tx_pending);
     }
 }
 
@@ -411,23 +449,20 @@ static void spi_processing_task(void *pvParameters)
             continue;
         }
         
-        // 检查从机状态
+        /* Linux esp_spi.c：仅在 trans_ready(HS) 时交换；IRQ 略早于 HS 建立时轮询稍等 */
+        for (int w = 0; w < 800 && gpio_get_level(SPI_HANDSHAKE_PIN) == 0; w++) {
+            esp_rom_delay_us(10);
+        }
         if (gpio_get_level(SPI_HANDSHAKE_PIN) == 0) {
+            stats.skip_hs_low++;
             xSemaphoreGive(spi_mutex);
             continue;
         }
         
-        // 获取发送数据（按优先级）
+        /* 从机 DR 可能为短脉冲：边沿 IRQ 到达任务时 DR 常为 0。只要 HS=1 即应完成一帧
+         * 交换（无 TX 时用 dummy），否则从机已 queue 的事务永远不会被主机时钟移出。 */
         bool has_tx_data = (dequeue_tx_buffer(&tx_handle) == 0);
-        
-        // 检查是否有接收数据
-        bool has_rx_data = (gpio_get_level(SPI_DATA_READY_PIN) == 1);
-        
-        if (!has_tx_data && !has_rx_data) {
-            xSemaphoreGive(spi_mutex);
-            continue;
-        }
-        
+
         // 分配缓冲区
         tx_buf = alloc_tx_buffer();
         rx_buf = alloc_tx_buffer();
@@ -444,10 +479,11 @@ static void spi_processing_task(void *pvParameters)
             memcpy(tx_buf, tx_handle.buffer, tx_handle.len);
             free_tx_buffer(tx_handle.buffer);
         } else {
-            // 发送空包触发接收
+            /* 与从机 get_next_tx_buffer() dummy 一致：if_type/if_num 各 4bit 置 0xF */
             memset(tx_buf, 0, sizeof(struct esp_payload_header));
             struct esp_payload_header *hdr = (struct esp_payload_header *)tx_buf;
-            hdr->if_type = 0x0F;
+            hdr->if_type = ESP_HOSTED_DUMMY_IF_TYPE;
+            hdr->if_num = ESP_HOSTED_DUMMY_IF_TYPE;
             hdr->len = 0;
         }
         
@@ -455,17 +491,9 @@ static void spi_processing_task(void *pvParameters)
         gpio_set_level(SPI_CS_PIN, 0);
         vTaskDelay(pdMS_TO_TICKS(1));
         
-        // 执行SPI传输
-        uint16_t tx_len = SPI_BUFFER_SIZE;
-        if (has_tx_data) {
-            tx_len = tx_handle.len;
-            if (!IS_SPI_DMA_ALIGNED(tx_len)) {
-                tx_len = MAKE_SPI_DMA_ALIGNED(tx_len);
-            }
-        }
-        
+        /* 从机 spi_slave 队列长度固定为 SPI_BUFFER_SIZE；主机必须始终交换整帧字节数 */
         spi_transaction_t trans = {
-            .length = tx_len * 8,
+            .length = SPI_BUFFER_SIZE * 8,
             .tx_buffer = tx_buf,
             .rx_buffer = rx_buf,
         };
@@ -479,32 +507,62 @@ static void spi_processing_task(void *pvParameters)
             ESP_LOGE(TAG, "SPI transmit failed: %d", ret);
             stats.spi_trans_errors++;
         } else {
-            // 处理接收数据
             struct esp_payload_header *rx_hdr = (struct esp_payload_header *)rx_buf;
-            uint16_t rx_len = le16toh(rx_hdr->len);
-            
-            if (rx_hdr->if_type != 0x0F && rx_len > 0) {
-                stats.rx_packets++;
-                stats.rx_bytes += rx_len;
-                
-                // 放入接收队列
-                spi_buffer_handle_t rx_handle = {
-                    .buffer = rx_buf,
-                    .len = rx_len,
-                    .prio = (rx_hdr->if_type == ESP_SERIAL_IF) ? PRIO_Q_HIGH : PRIO_Q_NORMAL
-                };
-                
-                uint8_t rx_prio = (rx_hdr->if_type == ESP_SERIAL_IF) ? PRIO_Q_HIGH : 
-                                  (rx_hdr->if_type == ESP_HCI_IF) ? PRIO_Q_HIGH : PRIO_Q_NORMAL;
-                
-                if (xQueueSend(rx_queues[rx_prio], &rx_handle, pdMS_TO_TICKS(10)) != pdTRUE) {
-                    free_tx_buffer(rx_buf);
-                    stats.queue_full_count++;
+            uint16_t rx_plen = 0;
+
+            if (rx_hdr->if_type == ESP_HOSTED_DUMMY_IF_TYPE || le16toh(rx_hdr->len) == 0) {
+                stats.rx_dummy++;
+            } else if (!hosted_rx_frame_valid(rx_buf, &rx_plen)) {
+                stats.invalid_packets++;
+                static unsigned s_bad_rx;
+                if (s_bad_rx < 6) {
+                    ESP_LOGW(TAG, "RX drop: if_type=%u len=%u off=%u (hdr_sz=%u buf=%u)",
+                             (unsigned)rx_hdr->if_type, (unsigned)le16toh(rx_hdr->len),
+                             (unsigned)le16toh(rx_hdr->offset), (unsigned)sizeof(struct esp_payload_header),
+                             (unsigned)SPI_BUFFER_SIZE);
+                    ESP_LOG_BUFFER_HEXDUMP(TAG, rx_buf, 24, ESP_LOG_WARN);
+                    s_bad_rx++;
                 }
-                
-                rx_buf = NULL;  // 已移交所有权
+            } else {
+                stats.rx_packets++;
+                stats.rx_bytes += rx_plen;
+
+                uint16_t off = le16toh(rx_hdr->offset);
+                if (s_eth_rxq && eth_netif &&
+                    (rx_hdr->if_type == ESP_STA_IF || rx_hdr->if_type == ESP_AP_IF)) {
+                    uint8_t *copy = (uint8_t *)malloc(rx_plen);
+                    if (!copy) {
+                        stats.queue_full_count++;
+                    } else {
+                        memcpy(copy, rx_buf + off, rx_plen);
+                        eth_rx_msg_t m = {.payload = copy, .len = rx_plen};
+                        if (xQueueSend(s_eth_rxq, &m, pdMS_TO_TICKS(20)) != pdTRUE) {
+                            free(copy);
+                            stats.queue_full_count++;
+                        }
+                    }
+                    free_tx_buffer(rx_buf);
+                    rx_buf = NULL;
+                } else {
+                    spi_buffer_handle_t rx_handle = {
+                        .buffer = rx_buf,
+                        .len = rx_plen,
+                        .prio = (rx_hdr->if_type == ESP_SERIAL_IF) ? PRIO_Q_HIGH : PRIO_Q_NORMAL,
+                    };
+
+                    uint8_t rx_prio = (rx_hdr->if_type == ESP_SERIAL_IF)   ? PRIO_Q_HIGH
+                                     : (rx_hdr->if_type == ESP_HCI_IF)    ? PRIO_Q_HIGH
+                                                                          : PRIO_Q_NORMAL;
+
+                    if (xQueueSend(rx_queues[rx_prio], &rx_handle, pdMS_TO_TICKS(10)) != pdTRUE) {
+                        free_tx_buffer(rx_buf);
+                        stats.queue_full_count++;
+                    }
+
+                    rx_buf = NULL;
+                }
             }
-            
+
             if (has_tx_data) {
                 stats.tx_packets++;
                 stats.tx_bytes += tx_handle.len;
@@ -539,8 +597,8 @@ int spi_host_send(uint8_t *data, uint16_t len, uint8_t prio)
         return -ENOMEM;
     }
     
-    // 封装ESP Header
     struct esp_payload_header *hdr = (struct esp_payload_header *)buf;
+    memset(hdr, 0, sizeof(*hdr));
     hdr->if_type = ESP_STA_IF;
     hdr->if_num = 0;
     hdr->len = htole16(len);
@@ -550,10 +608,9 @@ int spi_host_send(uint8_t *data, uint16_t len, uint8_t prio)
     hdr->checksum = 0;
     
     memcpy(buf + sizeof(struct esp_payload_header), data, len);
-    
+
     uint16_t total_len = sizeof(struct esp_payload_header) + len;
-    hdr->checksum = htole16(compute_checksum(buf, total_len));
-    
+
     if (!IS_SPI_DMA_ALIGNED(total_len)) {
         total_len = MAKE_SPI_DMA_ALIGNED(total_len);
     }
@@ -566,48 +623,221 @@ int spi_host_send(uint8_t *data, uint16_t len, uint8_t prio)
     return ret;
 }
 
+/* 与 IDF examples/network/sta2eth 相同：自定义 driver.transmit + esp_netif_receive */
+static esp_netif_ip_info_t s_spi_ip;
+
+static esp_err_t spi_eth_transmit(void *h, void *buffer, size_t len)
+{
+    (void)h;
+    if (len == 0 || len > (SPI_BUFFER_SIZE - sizeof(struct esp_payload_header))) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    int r = spi_host_send((uint8_t *)buffer, (uint16_t)len, PRIO_Q_NORMAL);
+    return (r == 0) ? ESP_OK : ESP_FAIL;
+}
+
+static void spi_eth_free_rx(void *h, void *buffer)
+{
+    (void)h;
+    free(buffer);
+}
+
+static void eth_rx_dispatch_task(void *arg)
+{
+    (void)arg;
+    eth_rx_msg_t m;
+    for (;;) {
+        if (xQueueReceive(s_eth_rxq, &m, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (eth_netif && m.payload) {
+            esp_err_t e = esp_netif_receive(eth_netif, m.payload, m.len, NULL);
+            if (e != ESP_OK) {
+                free(m.payload);
+            }
+        } else if (m.payload) {
+            free(m.payload);
+        }
+    }
+}
+
 // ==================== 网络与HTTP测试 ====================
 
-// 初始化网络接口（简化版，用于HTTP测试）
 static esp_err_t init_network_interface(void)
 {
-    // 创建默认的以太网网络接口配置
-    esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
-    eth_netif = esp_netif_new(&netif_cfg);
+    memset(&s_spi_ip, 0, sizeof(s_spi_ip));
+    s_spi_ip.ip.addr = ESP_IP4TOADDR(192, 168, 4, 2);
+    s_spi_ip.netmask.addr = ESP_IP4TOADDR(255, 255, 255, 0);
+    s_spi_ip.gw.addr = ESP_IP4TOADDR(192, 168, 4, 1);
+
+    esp_netif_inherent_config_t base = {
+        .flags = (esp_netif_flags_t)(ESP_NETIF_FLAG_GARP | ESP_NETIF_FLAG_EVENT_IP_MODIFIED | ESP_NETIF_FLAG_AUTOUP),
+        .mac = {0x02, 0x03, 0x04, 0x05, 0x06, 0x07},
+        .ip_info = &s_spi_ip,
+        .get_ip_event = 0,
+        .lost_ip_event = 0,
+        .if_key = "spi_br",
+        .if_desc = "spi host bridge",
+        .route_prio = 50,
+        .bridge_info = NULL,
+    };
+
+    esp_netif_driver_ifconfig_t driver = {
+        .handle = (void *)1,
+        .transmit = spi_eth_transmit,
+        .transmit_wrap = NULL,
+        .driver_free_rx_buffer = spi_eth_free_rx,
+    };
+
+    struct esp_netif_netstack_config lwip_stack = {
+        .lwip =
+            {
+                .init_fn = ethernetif_init,
+                .input_fn = ethernetif_input,
+            },
+    };
+
+    esp_netif_config_t cfg = {
+        .base = &base,
+        .driver = &driver,
+        .stack = &lwip_stack,
+    };
+
+    eth_netif = esp_netif_new(&cfg);
     if (!eth_netif) {
-        ESP_LOGE(TAG, "Failed to create netif");
+        ESP_LOGE(TAG, "esp_netif_new failed");
         return ESP_FAIL;
     }
-    
-    uint8_t mac_addr[] = HOST_MAC_ADDR;
-    esp_netif_set_mac(eth_netif, mac_addr);
-    
-    // 配置静态IP
-    esp_netif_ip_info_t ip_info = {
-        .ip = { .addr = ESP_IP4TOADDR(192, 168, 4, 2) },
-        .netmask = { .addr = ESP_IP4TOADDR(255, 255, 255, 0) },
-        .gw = { .addr = ESP_IP4TOADDR(192, 168, 4, 1) },
-    };
-    esp_netif_set_ip_info(eth_netif, &ip_info);
-    
-    // 设置默认路由
+
+    ESP_ERROR_CHECK(esp_netif_set_ip_info(eth_netif, &s_spi_ip));
+
+    esp_netif_dns_info_t dns_main = {0};
+    dns_main.ip.type = IPADDR_TYPE_V4;
+    dns_main.ip.u_addr.ip4.addr = ESP_IP4TOADDR(192, 168, 4, 1);
+    esp_netif_set_dns_info(eth_netif, ESP_NETIF_DNS_MAIN, &dns_main);
+
+    esp_netif_dns_info_t dns_bak = {0};
+    dns_bak.ip.type = IPADDR_TYPE_V4;
+    dns_bak.ip.u_addr.ip4.addr = ESP_IP4TOADDR(8, 8, 8, 8);
+    esp_netif_set_dns_info(eth_netif, ESP_NETIF_DNS_BACKUP, &dns_bak);
+
+    esp_netif_dns_info_t dns_fb = {0};
+    dns_fb.ip.type = IPADDR_TYPE_V4;
+    dns_fb.ip.u_addr.ip4.addr = ESP_IP4TOADDR(1, 1, 1, 1);
+    esp_netif_set_dns_info(eth_netif, ESP_NETIF_DNS_FALLBACK, &dns_fb);
+
     esp_netif_set_default_netif(eth_netif);
-    
-    ESP_LOGI(TAG, "Network interface initialized: MAC %02X:%02X:%02X:%02X:%02X:%02X",
-             mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
-    ESP_LOGI(TAG, "IP: 192.168.4.2, GW: 192.168.4.1");
-    
+    esp_netif_action_start(eth_netif, NULL, 0, NULL);
+
+    ESP_LOGI(TAG,
+             "SPI bridge netif: 192.168.4.2 gw 192.168.4.1 | DNS main=192.168.4.1 backup=8.8.8.8 fallback=1.1.1.1");
     return ESP_OK;
+}
+
+static void ping_on_success(esp_ping_handle_t hdl, void *args)
+{
+    (void)args;
+    uint16_t seqno = 0;
+    uint32_t elapsed = 0;
+    esp_ping_get_profile(hdl, ESP_PING_PROF_SEQNO, &seqno, sizeof(seqno));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_TIMEGAP, &elapsed, sizeof(elapsed));
+    ESP_LOGI(TAG, "ping 8.8.8.8 reply: icmp_seq=%u time=%" PRIu32 " ms", (unsigned)seqno, elapsed);
+}
+
+static void ping_on_timeout(esp_ping_handle_t hdl, void *args)
+{
+    (void)args;
+    uint16_t seqno = 0;
+    esp_ping_get_profile(hdl, ESP_PING_PROF_SEQNO, &seqno, sizeof(seqno));
+    ESP_LOGW(TAG, "ping 8.8.8.8: icmp_seq=%u timeout", (unsigned)seqno);
+}
+
+static void ping_on_end(esp_ping_handle_t hdl, void *args)
+{
+    SemaphoreHandle_t done = (SemaphoreHandle_t)args;
+    uint32_t tx = 0, rx = 0;
+    esp_ping_get_profile(hdl, ESP_PING_PROF_REQUEST, &tx, sizeof(tx));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_REPLY, &rx, sizeof(rx));
+    ESP_LOGI(TAG, "ping 8.8.8.8 finished: %" PRIu32 " sent, %" PRIu32 " received", tx, rx);
+    esp_ping_delete_session(hdl);
+    if (done) {
+        xSemaphoreGive(done);
+    }
+}
+
+static void run_ping_8_8_8_8(void)
+{
+    ESP_LOGI(TAG, "========== ICMP ping 8.8.8.8 (5 probes) ==========");
+
+    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    if (!done) {
+        ESP_LOGE(TAG, "ping: no sem");
+        return;
+    }
+
+    esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
+    cfg.count = 5;
+    cfg.interval_ms = 800;
+    cfg.timeout_ms = 3000;
+    ip_addr_set_ip4_u32_val(cfg.target_addr, esp_ip4addr_aton("8.8.8.8"));
+
+    esp_ping_callbacks_t cbs = {
+        .cb_args = done,
+        .on_ping_success = ping_on_success,
+        .on_ping_timeout = ping_on_timeout,
+        .on_ping_end = ping_on_end,
+    };
+
+    esp_ping_handle_t ping = NULL;
+    esp_err_t err = esp_ping_new_session(&cfg, &cbs, &ping);
+    if (err != ESP_OK || !ping) {
+        ESP_LOGE(TAG, "esp_ping_new_session: %s", esp_err_to_name(err));
+        vSemaphoreDelete(done);
+        return;
+    }
+
+    err = esp_ping_start(ping);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ping_start: %s", esp_err_to_name(err));
+        esp_ping_delete_session(ping);
+        vSemaphoreDelete(done);
+        return;
+    }
+
+    if (xSemaphoreTake(done, pdMS_TO_TICKS(25000)) != pdTRUE) {
+        ESP_LOGW(TAG, "ping 8.8.8.8: wait end timeout, stopping session");
+        esp_ping_stop(ping);
+        (void)xSemaphoreTake(done, pdMS_TO_TICKS(3000));
+    }
+
+    vSemaphoreDelete(done);
+    ESP_LOGI(TAG, "========== ICMP ping end ==========");
 }
 
 // HTTP测试任务 - 访问百度
 static void http_test_task(void *pvParameters)
 {
     vTaskDelay(pdMS_TO_TICKS(10000));  // 等待网络就绪
-    
+
+    run_ping_8_8_8_8();
+
     ESP_LOGI(TAG, "========== HTTP测试开始 ==========");
+    {
+        struct addrinfo hints = {0};
+        struct addrinfo *res = NULL;
+        hints.ai_family = AF_INET;
+        int gai = getaddrinfo("www.baidu.com", NULL, &hints, &res);
+        if (gai != 0 || res == NULL) {
+            ESP_LOGW(TAG, "getaddrinfo(www.baidu.com) failed ret=%d (DNS issue; ping 8.8.8.8 does not use DNS)", gai);
+        } else {
+            const struct sockaddr_in *sa = (const struct sockaddr_in *)res->ai_addr;
+            ESP_LOGI(TAG, "getaddrinfo(www.baidu.com) OK -> %s", inet_ntoa(sa->sin_addr));
+            freeaddrinfo(res);
+        }
+    }
+
     ESP_LOGI(TAG, "正在访问 http://www.baidu.com ...");
-    
+
     esp_http_client_config_t config = {
         .url = "http://www.baidu.com",
         .method = HTTP_METHOD_GET,
@@ -658,6 +888,10 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "ESP32 SPI Host - Interrupt-Driven Version");
     ESP_LOGI(TAG, "============================================");
+    ESP_LOGI(TAG, "SPI proto: hdr=%u bytes, frame buf=%u bytes (must match router slave 1600)",
+             (unsigned)sizeof(struct esp_payload_header), (unsigned)SPI_BUFFER_SIZE);
+    ESP_LOGI(TAG, "Pins MOSI=%d MISO=%d CLK=%d CS=%d HS=%d DR=%d @ %d MHz", SPI_MOSI_PIN, SPI_MISO_PIN,
+             SPI_CLK_PIN, SPI_CS_PIN, SPI_HANDSHAKE_PIN, SPI_DATA_READY_PIN, SPI_CLK_MHZ);
     
     // 创建同步原语
     spi_sem = xSemaphoreCreateBinary();
@@ -670,27 +904,34 @@ void app_main(void)
         tx_queues[i] = xQueueCreate(SPI_QUEUE_SIZE, sizeof(spi_buffer_handle_t));
         rx_queues[i] = xQueueCreate(SPI_QUEUE_SIZE, sizeof(spi_buffer_handle_t));
     }
-    
+
+    s_eth_rxq = xQueueCreate(24, sizeof(eth_rx_msg_t));
+    if (!s_eth_rxq) {
+        ESP_LOGE(TAG, "Failed to create eth RX queue");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Initializing network stack (before SPI, eth_netif must exist for RX path)...");
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(init_network_interface());
+    xTaskCreate(eth_rx_dispatch_task, "eth_rx", 4096, NULL, 6, NULL);
+
     // 初始化SPI
     ESP_ERROR_CHECK(spi_master_init());
-    
+
     // 初始化GPIO（中断驱动）
     gpio_init_interrupt_driven();
-    
+
     // 创建SPI处理任务
     xTaskCreate(spi_processing_task, "spi_proc", 4096, NULL, 5, NULL);
-    
+
     // 打开数据路径
     data_path_control(true);
     
-    // 初始化网络栈和网络接口
-    ESP_LOGI(TAG, "Initializing network stack...");
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(init_network_interface());
-    
     // 创建HTTP测试任务
     xTaskCreate(http_test_task, "http_test", 8192, NULL, 4, NULL);
-    ESP_LOGI(TAG, "HTTP test task created - will test baidu.com in 10 seconds");
+    ESP_LOGI(TAG, "http_test task: after 10s delay -> ping 8.8.8.8 -> http://www.baidu.com");
     
     ESP_LOGI(TAG, "Initialization complete. Waiting for interrupts...");
     
@@ -699,8 +940,12 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(10000));
         
         // 打印统计
-        ESP_LOGI(TAG, "Stats: TX=%lu, RX=%lu, IRQ=%lu, Pending=%lu, Paused=%s",
-                 stats.tx_packets, stats.rx_packets, stats.interrupts_count,
-                 tx_pending, tx_paused ? "YES" : "NO");
+        ESP_LOGI(TAG,
+                 "Stats: TX=%lu RX=%lu IRQ=%lu Pend=%lu Pause=%s | skipHS=%lu dummyRX=%lu inv=%lu csum=%lu spiErr=%lu",
+                 (unsigned long)stats.tx_packets, (unsigned long)stats.rx_packets,
+                 (unsigned long)stats.interrupts_count, (unsigned long)tx_pending,
+                 tx_paused ? "YES" : "NO", (unsigned long)stats.skip_hs_low,
+                 (unsigned long)stats.rx_dummy, (unsigned long)stats.invalid_packets,
+                 (unsigned long)stats.checksum_errors, (unsigned long)stats.spi_trans_errors);
     }
 }

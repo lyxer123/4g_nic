@@ -41,6 +41,14 @@ void system_bridge_init_netifs_from_hw(void)
     ESP_LOGI(TAG, "netifs by HW: w5500=%d usb_cat1=%d", (int)system_w5500_detect_present(),
              (int)system_usb_cat1_detect_present());
 
+#if defined(CONFIG_BRIDGE_DATA_FORWARDING_NETIF_SPI) || defined(CONFIG_BRIDGE_EXTERNAL_NETIF_SPI)
+    ESP_LOGI(TAG,
+             "SPI bridge slave pins (host spi_config.h / wiring must match): MOSI=%d MISO=%d SCLK=%d CS=%d "
+             "HS=%d DR=%d %dMHz",
+             CONFIG_GPIO_MOSI, CONFIG_GPIO_MISO, CONFIG_GPIO_SCLK, CONFIG_GPIO_CS,
+             CONFIG_ESP_SPI_GPIO_HANDSHAKE, CONFIG_ESP_SPI_GPIO_DATA_READY, CONFIG_SPI_CLK_MHZ);
+#endif
+
 #if defined(CONFIG_BRIDGE_DATA_FORWARDING_NETIF_ETHERNET) || defined(CONFIG_BRIDGE_NETIF_ETHERNET_AUTO_WAN_OR_LAN) || \
     defined(CONFIG_BRIDGE_EXTERNAL_NETIF_ETHERNET)
     /* If NVS has a valid saved mode, prefer creating only the required Ethernet role(s) on boot.

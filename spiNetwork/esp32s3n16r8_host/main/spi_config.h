@@ -11,7 +11,8 @@
 
 // SPI配置参数
 #define SPI_CLK_MHZ         30      // 30MHz时钟
-#define SPI_BUFFER_SIZE     4096    // 缓冲区大小
+/* 与路由器侧 esp-iot-bridge spi_slave_api.c 中 SPI_BUFFER_SIZE(1600) 一致 */
+#define SPI_BUFFER_SIZE     1600
 #define SPI_QUEUE_SIZE      20      // ESP到Host队列大小
 
 // 其他公共配置

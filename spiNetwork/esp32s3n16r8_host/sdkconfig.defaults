@@ -1,5 +1,5 @@
-# ESP32 SPI Host Bridge Configuration
-CONFIG_IDF_TARGET_ESP32=y
+# ESP32-S3 SPI host bridge; keep ASCII-only in this file (kconfgen on Windows uses system encoding).
+CONFIG_IDF_TARGET_ESP32S3=y
 
 # WiFi Configuration
 CONFIG_ESP32_WIFI_SW_COEXIST_ENABLE=y

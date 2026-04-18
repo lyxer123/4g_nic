@@ -90,9 +90,9 @@ void app_main(void)
              (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size());
 
     esp_err_t ret = web_service_start();
-    if (ret == ESP_ERR_HTTPD_TASK) {
-        // HTTP任务创建失败，可能是内存不足或重复启动
-        ESP_LOGW(TAG, "Web service task creation failed, continuing without web interface");
+    if (ret == ESP_ERR_HTTPD_TASK || ret == ESP_ERR_NO_MEM) {
+        /* Low internal DRAM (e.g. SPIRAM_USE_MEMMAP) or httpd task spawn failure */
+        ESP_LOGW(TAG, "Web service unavailable (%s), continuing without web interface", esp_err_to_name(ret));
     } else if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Web service start failed: %s", esp_err_to_name(ret));
     } else {

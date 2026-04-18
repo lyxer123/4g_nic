@@ -7,4 +7,5 @@ idf_component_register(
     SRCS "main_interrupt_driven.c"
     # SRCS "main.c"
     INCLUDE_DIRS "."
+    REQUIRES driver esp_netif lwip esp_event esp_http_client
 )

@@ -14,6 +14,7 @@
 #include "lwip/lwip_napt.h"
 #include <endian.h>
 #include "spi_config.h"
+#include "esp_hosted_spi_proto.h"
 
 // DMA对齐定义 (来自官方实现)
 #define SPI_DMA_ALIGN       4
@@ -48,23 +49,12 @@ typedef struct {
 static spi_stats_t stats = {0};
 static uint16_t sequence_num = 0;
 
-// ESP Payload Header 结构
-struct esp_payload_header {
-    uint8_t  if_type;       // 接口类型
-    uint8_t  if_num;        // 接口编号
-    uint16_t len;           // 数据长度 (小端序)
-    uint16_t offset;        // 数据偏移 (小端序)
-    uint16_t checksum;      // 校验和 (小端序)
-    uint16_t seq_num;       // 序列号 (小端序)
-    uint8_t  flags;         // 标志位
-} __attribute__((packed));
-
 // 接口类型定义
 #define ESP_STA_IF          0x00
 #define ESP_AP_IF           0x01
 #define ESP_SERIAL_IF       0x02
 #define ESP_HCI_IF          0x03
-#define ESP_PRIV_IF         0x0F
+#define ESP_PRIV_IF         0x04
 
 // 内存池管理 (参考官方实现)
 typedef struct {
@@ -231,15 +221,14 @@ static int encapsulate_packet(uint8_t *dst, uint8_t *eth_frame, uint16_t eth_len
     }
     
     struct esp_payload_header *hdr = (struct esp_payload_header *)dst;
-    
-    // 填充Header (参考官方实现)
-    hdr->if_type = ESP_STA_IF;          // WiFi Station接口
+    memset(hdr, 0, sizeof(*hdr));
+    hdr->if_type = ESP_STA_IF;
     hdr->if_num = 0;
-    hdr->len = htole16(eth_len);        // 小端序转换
-    hdr->offset = htole16(sizeof(struct esp_payload_header));  // 数据偏移
+    hdr->len = htole16(eth_len);
+    hdr->offset = htole16(sizeof(struct esp_payload_header));
     hdr->seq_num = htole16(sequence_num++);
     hdr->flags = 0;
-    hdr->checksum = 0;                  // 先设为0,后面计算
+    hdr->checksum = 0;
     
     // 复制以太网帧
     memcpy(dst + sizeof(struct esp_payload_header), eth_frame, eth_len);
@@ -287,15 +276,16 @@ static int decapsulate_packet(uint8_t *src, uint8_t *eth_frame, uint16_t max_len
         return -1;
     }
     
-    // 验证校验和 (可选)
     uint16_t rx_checksum = le16toh(hdr->checksum);
-    hdr->checksum = 0;  // 清零后计算
-    uint16_t calc_checksum = compute_checksum(src, offset + data_len);
-    
-    if (calc_checksum != rx_checksum) {
-        ESP_LOGW(TAG, "Checksum mismatch: calc=%04X, rx=%04X", calc_checksum, rx_checksum);
-        stats.checksum_errors++;
-        return -1;
+    if (rx_checksum != 0) {
+        hdr->checksum = 0;
+        uint16_t calc_checksum = compute_checksum(src, offset + data_len);
+        hdr->checksum = htole16(rx_checksum);
+        if (calc_checksum != rx_checksum) {
+            ESP_LOGW(TAG, "Checksum mismatch: calc=%04X, rx=%04X", calc_checksum, rx_checksum);
+            stats.checksum_errors++;
+            return -1;
+        }
     }
     
     // 复制以太网帧
@@ -307,7 +297,8 @@ static int decapsulate_packet(uint8_t *src, uint8_t *eth_frame, uint16_t max_len
 // SPI事务: 发送数据并接收响应
 static int spi_transaction(uint8_t *tx_buf, uint8_t *rx_buf, uint16_t len)
 {
-    if (!spi_handle || !tx_buf || !rx_buf || len == 0) {
+    (void)len;
+    if (!spi_handle || !tx_buf || !rx_buf) {
         return -1;
     }
     
@@ -338,9 +329,8 @@ static int spi_transaction(uint8_t *tx_buf, uint8_t *rx_buf, uint16_t len)
         return -1;
     }
     
-    // 执行SPI传输
     spi_transaction_t trans = {
-        .length = len * 8,      // 长度以位为单位
+        .length = SPI_BUFFER_SIZE * 8,
         .tx_buffer = tx_buf,
         .rx_buffer = rx_buf,
     };
@@ -361,7 +351,7 @@ static int spi_transaction(uint8_t *tx_buf, uint8_t *rx_buf, uint16_t len)
     // 结束事务 (拉高CS)
     gpio_set_level(SPI_CS_PIN, 1);
     
-    return len;
+    return SPI_BUFFER_SIZE;
 }
 
 // 发送网络数据包到从机 (使用内存池)
@@ -391,7 +381,7 @@ static int send_packet_to_slave(uint8_t *eth_frame, uint16_t eth_len)
     }
     
     // SPI传输
-    int ret = spi_transaction(tx_buf, rx_buf, total_len);
+    int ret = spi_transaction(tx_buf, rx_buf, SPI_BUFFER_SIZE);
     if (ret < 0) {
         ESP_LOGW(TAG, "SPI transaction failed");
         free_tx_buffer(tx_buf);
@@ -406,7 +396,7 @@ static int send_packet_to_slave(uint8_t *eth_frame, uint16_t eth_len)
     // 处理接收到的数据
     struct esp_payload_header *hdr = (struct esp_payload_header *)rx_buf;
     uint16_t rx_len = le16toh(hdr->len);
-    if (hdr->if_type != 0x0F && rx_len > 0) {  // 不是空数据
+    if (hdr->if_type != ESP_HOSTED_DUMMY_IF_TYPE && rx_len > 0) {
         stats.rx_packets++;
         stats.rx_bytes += rx_len;
         
@@ -435,10 +425,12 @@ static int receive_packet_from_slave(uint8_t *eth_frame, uint16_t max_len)
     // 发送空数据包以触发接收
     memset(tx_buf, 0, SPI_BUFFER_SIZE);
     struct esp_payload_header *hdr = (struct esp_payload_header *)tx_buf;
-    hdr->if_type = 0x0F;  // 空数据
+    memset(hdr, 0, sizeof(*hdr));
+    hdr->if_type = ESP_HOSTED_DUMMY_IF_TYPE;
+    hdr->if_num = ESP_HOSTED_DUMMY_IF_TYPE;
     hdr->len = 0;
     
-    int ret = spi_transaction(tx_buf, rx_buf, sizeof(struct esp_payload_header));
+    int ret = spi_transaction(tx_buf, rx_buf, SPI_BUFFER_SIZE);
     if (ret < 0) {
         free_tx_buffer(tx_buf);
         free_tx_buffer(rx_buf);
@@ -448,7 +440,7 @@ static int receive_packet_from_slave(uint8_t *eth_frame, uint16_t max_len)
     // 检查接收到的数据
     hdr = (struct esp_payload_header *)rx_buf;
     uint16_t rx_len = le16toh(hdr->len);
-    if (hdr->if_type != 0x0F && rx_len > 0) {
+    if (hdr->if_type != ESP_HOSTED_DUMMY_IF_TYPE && rx_len > 0) {
         // 解封装数据包
         int eth_len = decapsulate_packet(rx_buf, eth_frame, max_len);
         if (eth_len > 0) {
