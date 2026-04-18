@@ -37,6 +37,7 @@ static uint8_t peek_saved_work_mode_u8(void)
 
 void system_bridge_init_netifs_from_hw(void)
 {
+    ESP_LOGI(TAG, "init_netifs_from_hw: begin (esp_bridge_create_* …)");
     ESP_LOGI(TAG, "netifs by HW: w5500=%d usb_cat1=%d", (int)system_w5500_detect_present(),
              (int)system_usb_cat1_detect_present());
 
@@ -144,4 +145,5 @@ void system_bridge_init_netifs_from_hw(void)
     esp_wifi_disable_pmf_config(WIFI_IF_STA);
 #endif
 #endif
+    ESP_LOGI(TAG, "init_netifs_from_hw: done");
 }

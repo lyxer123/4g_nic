@@ -372,6 +372,7 @@ uint8_t system_mode_manager_pick_hw_default_mode(void)
 
 void system_mode_manager_log_startup_plan(void)
 {
+    ESP_LOGI(TAG, "startup_plan: begin");
     uint8_t mode = 0;
     esp_err_t e = load_work_mode(&mode);
     if (e == ESP_OK && system_mode_manager_get_profile(mode) && system_mode_manager_mode_allowed(mode)) {

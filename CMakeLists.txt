@@ -23,3 +23,5 @@ endforeach()
 
 string(REGEX REPLACE ".*/\(.*\)" "\\1" CURDIR ${CMAKE_CURRENT_SOURCE_DIR})
 project(${CURDIR})
+
+message(STATUS "4g_nic: If you changed CONFIG_BOOTLOADER_WDT_* / SPIRAM boot options, flash the 2nd-stage bootloader or WDT timeout will not apply: idf.py bootloader-flash")

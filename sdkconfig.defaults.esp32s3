@@ -1,4 +1,6 @@
-CONFIG_FREERTOS_UNICORE=y
+# Do not force unicore here: main sdkconfig.defaults uses dual-core for ESP32-S3 + OPI PSRAM.
+# Forcing UNICORE=y can be merged after multicore defaults and break PSRAM / CPU1 startup.
+# CONFIG_FREERTOS_UNICORE is not set
 
 #
 # TinyUSB Stack
@@ -20,15 +22,22 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 
 #
-# OPI Octal PSRAM @ 80MHz: offloads WiFi/lwIP/PPP buffers from internal SRAM.
+# OPI Octal PSRAM @ 80MHz (memory-mapped; no SPIRAM heap on ESP-IDF v5.2.x workaround).
+# ESP-IDF 5.2.x + Octal PSRAM: esp_psram_extram_add_to_heap_allocator can fault in
+# heap_caps_add_region_with_caps (see IDFGH-14757 / upgrade to v5.3+ for unified heap fix).
+# USE_MEMMAP skips that path; WiFi/lwIP cannot use CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP (Kconfig requires malloc/caps).
 # If your module has NO PSRAM, comment out all CONFIG_SPIRAM* below and fullclean rebuild.
 #
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
-CONFIG_SPIRAM_USE_MALLOC=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=32768
-CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_SPIRAM_BOOT_HW_INIT=y
+CONFIG_SPIRAM_BOOT_INIT=y
+CONFIG_SPIRAM_USE_MEMMAP=y
+# CONFIG_SPIRAM_USE_CAPS_ALLOC is not set
+# CONFIG_SPIRAM_USE_MALLOC is not set
+# CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP is not set
+CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND=y
 
 CONFIG_USB_TASK_CORE_ID=1
 

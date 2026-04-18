@@ -201,6 +201,9 @@ static esp_err_t probe_devices(usb_host_client_handle_t client)
 
 esp_err_t system_usb_cat1_detect_run(void)
 {
+    ESP_LOGI(TAG, "run: begin (enum_timeout_ms=%d rounds=%d enable_gpio=%d settle_ms=%d)",
+             CONFIG_SYSTEM_USB_CAT1_ENUM_TIMEOUT_MS, CONFIG_SYSTEM_USB_CAT1_PROBE_ROUNDS,
+             CONFIG_SYSTEM_USB_CAT1_ENABLE_GPIO, CONFIG_SYSTEM_USB_CAT1_ENABLE_SETTLE_MS);
     s_present = false;
     s_vid = 0;
     s_pid = 0;
@@ -340,6 +343,7 @@ esp_err_t system_usb_cat1_detect_run(void)
         }
     }
 
+    ESP_LOGI(TAG, "run: end present=%d", (int)s_present);
     return ESP_OK;
 }
 

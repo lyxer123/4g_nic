@@ -25,6 +25,7 @@ static void heap_log_cb(void *arg)
 
 esp_err_t system_stability_init(void)
 {
+    ESP_LOGI(TAG, "init: begin");
 #if CONFIG_SYSTEM_STABILITY_HEAP_LOG_INTERVAL_S > 0
     const uint64_t us = (uint64_t)CONFIG_SYSTEM_STABILITY_HEAP_LOG_INTERVAL_S * 1000000ULL;
     const esp_timer_create_args_t args = {
@@ -45,5 +46,6 @@ esp_err_t system_stability_init(void)
     }
     ESP_LOGI(TAG, "periodic heap log every %ds", CONFIG_SYSTEM_STABILITY_HEAP_LOG_INTERVAL_S);
 #endif
+    ESP_LOGI(TAG, "init: done");
     return ESP_OK;
 }

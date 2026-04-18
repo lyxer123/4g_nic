@@ -73,6 +73,7 @@ static void w5500_phy_reset_pulse(void)
 
 esp_err_t system_w5500_detect_run(void)
 {
+    ESP_LOGI(TAG, "run: begin (SPI host probe VERSIONR)");
     s_present = false;
     s_version_raw = 0;
 
@@ -133,6 +134,7 @@ esp_err_t system_w5500_detect_run(void)
         ESP_LOGW(TAG, "Unexpected VERSIONR=0x%02x (expected 0x%02x): chip absent or wrong device", ver,
                  W5500_CHIP_VERSION);
     }
+    ESP_LOGI(TAG, "run: end present=%d", (int)s_present);
     return ESP_OK;
 }
 

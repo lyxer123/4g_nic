@@ -32,12 +32,19 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
+CONFIG_FREERTOS_ENABLE_TASK_SNAPSHOT=y
+# Keep snapshot helpers in IRAM/default section during early boot (PSRAM + XIP sensitive window).
+# CONFIG_FREERTOS_PLACE_SNAPSHOT_FUNS_INTO_FLASH is not set
 
 # Watchdogs: recover from deadlock; timeouts relaxed for PPP / heavy lwIP load
 CONFIG_ESP_INT_WDT=y
 CONFIG_ESP_INT_WDT_TIMEOUT_MS=1000
 CONFIG_ESP_TASK_WDT_INIT=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
+# Second-stage bootloader RTC WDT (rst:0x10 RTCWDT_RTC_RST). Default 9000ms is too short when
+# SPIRAM memtest + external BSS/RODATA init runs before the scheduler feeds the RTC WDT.
+# Keep above worst-case early boot; unrelated to CONFIG_ESP_TASK_WDT_TIMEOUT_S.
+CONFIG_BOOTLOADER_WDT_TIME_MS=30000
 
 # Raise socket/TCP limits for router/NAPT under load (reduce resource exhaustion)
 CONFIG_LWIP_MAX_SOCKETS=24
@@ -164,29 +171,105 @@ CONFIG_ESP_WIFI_TX_BA_WIN=6
 CONFIG_ESP_WIFI_RX_BA_WIN=6
 
 #
-# PSRAM Configuration - DISABLED (unstable with single core)
-# Using internal RAM optimization instead
+# PSRAM Configuration - Based on Lua-uPC (stable with dual core)
+# ESP32-S3 with 8MB PSRAM, optimized for stability
 #
-# CONFIG_SPIRAM is not set
-# CONFIG_SPIRAM_MODE_OCT is not set
+# Keep SPIRAM_BOOT_INIT + BOOT_HW_INIT on whenever PSRAM is used (heap WiFi offload, caps, etc.).
+#
+CONFIG_SPIRAM=y
+# CONFIG_SPIRAM_MODE_QUAD is not set
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
 # CONFIG_SPIRAM_SPEED_40M is not set
-# CONFIG_SPIRAM_SPEED_80M is not set
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_SPEED=80
+# CONFIG_SPIRAM_ECC_ENABLE is not set
+CONFIG_SPIRAM_BOOT_HW_INIT=y
+CONFIG_SPIRAM_BOOT_INIT=y
+
+# PSRAM: USE_MEMMAP on ESP-IDF v5.2.x avoids esp_psram_extram_add_to_heap_allocator (heap_caps_add_region_with_caps
+# IllegalInstruction on some S3 + Octal builds; fixed in newer IDF, see IDFGH-14757). Trade-off: no SPIRAM heap, so
+# CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP is unavailable (requires USE_MALLOC or USE_CAPS_ALLOC).
+CONFIG_SPIRAM_USE_MEMMAP=y
+# CONFIG_SPIRAM_USE_CAPS_ALLOC is not set
 # CONFIG_SPIRAM_USE_MALLOC is not set
 # CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP is not set
-# CONFIG_SPIRAM_TYPE_AUTO is not set
-# CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL is not set
+
+# External .bss in PSRAM (SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY) runs a large memset in call_start_cpu0
+# before esp_clk_init. On some 5.2.x + Octal PSRAM + WiFi linker layouts this has caused IllegalInstruction
+# in esp_clk_init (ICache/garbage instructions). Keep internal BSS; after upgrading IDF, revisit malloc + TRY_ALLOCATE.
+# CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY is not set
+# Do NOT enable SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY on ESP-IDF v5.2.x: IDFGH-14757 (fixed v5.3+ PR #15513).
+# CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY is not set
+# Task stacks MUST stay in internal RAM for stability (cache off during flash ops)
+# CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY is not set
+
+# C11 atomics in PSRAM workaround (must appear in sdkconfig, not only defaults, after menuconfig runs).
+# Helps heap/spinlock paths when PSRAM is in the 0x3cxxxxxx map; relevant to early esp_psram_extram_add_to_heap_allocator.
+CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND=y
+
+# Skip full PSRAM walk at boot: it runs while the 2nd-stage bootloader RTC WDT is still armed
+# (until start_cpu0_default disables it) and can exceed the default 9000 ms if the bootloader
+# was not reflashed after increasing CONFIG_BOOTLOADER_WDT_TIME_MS.
+# CONFIG_SPIRAM_MEMTEST is not set
 
 #
-# Aggressive Memory Optimizations (No PSRAM)
+# Dual Core Mode (REQUIRED for PSRAM stability)
+# CONFIG_FREERTOS_UNICORE is not set
+CONFIG_FREERTOS_HZ=1000
+
 #
+# LWIP Configuration - Based on Lua-uPC
+#
+CONFIG_LWIP_ENABLE=y
+CONFIG_LWIP_IP_FORWARD=y
+CONFIG_LWIP_IPV4_NAPT=y
+CONFIG_LWIP_IPV4_NAPT_PORTMAP=y
+CONFIG_LWIP_FALLBACK_DNS_SERVER_SUPPORT=y
+CONFIG_LWIP_FALLBACK_DNS_SERVER_ADDRESS="114.114.114.114"
+CONFIG_LWIP_LOCAL_HOSTNAME="espressif"
+CONFIG_LWIP_TCPIP_TASK_PRIO=18
+CONFIG_LWIP_TIMERS_ONDEMAND=y
+CONFIG_LWIP_MAX_SOCKETS=10
+CONFIG_LWIP_SO_REUSE=y
+CONFIG_LWIP_SO_REUSE_RXTOALL=y
+CONFIG_LWIP_IP_DEFAULT_TTL=64
+CONFIG_LWIP_IP4_FRAG=y
+CONFIG_LWIP_IP6_FRAG=y
+CONFIG_LWIP_IP_REASS_MAX_PBUFS=10
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=32
+CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=3072
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_NO_AFFINITY=y
+
+# DHCP
+CONFIG_LWIP_DHCP_DOES_ARP_CHECK=y
+CONFIG_LWIP_DHCP_DISABLE_VENDOR_CLASS_ID=y
+CONFIG_LWIP_DHCP_OPTIONS_LEN=69
+CONFIG_LWIP_DHCPS=y
+CONFIG_LWIP_DHCPS_LEASE_UNIT=60
+CONFIG_LWIP_DHCPS_MAX_STATION_NUM=8
+CONFIG_LWIP_DHCPS_STATIC_ENTRIES=y
+CONFIG_LWIP_DHCPS_ADD_DNS=y
+
+# TCP
+CONFIG_LWIP_MAX_ACTIVE_TCP=16
+CONFIG_LWIP_MAX_LISTENING_TCP=16
+CONFIG_LWIP_TCP_HIGH_SPEED_RETRANSMISSION=y
+CONFIG_LWIP_TCP_MSS=1440
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=5760
+CONFIG_LWIP_TCP_WND_DEFAULT=5760
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=6
+CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE=6
+
+# UDP
+CONFIG_LWIP_MAX_UDP_PCBS=16
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=6
+
+# PPP (for 4G)
+CONFIG_LWIP_PPP_SUPPORT=y
+CONFIG_LWIP_PPP_ENABLE_IPV4=y
+CONFIG_LWIP_PPP_ENABLE_IPV6=y
+
 # Minimal HTTP server
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=512
 CONFIG_HTTPD_MAX_URI_LEN=256
-
-# LWIP - 
-# HTTPD needs max_open_sockets + 3 internal = at least 10 total
-CONFIG_LWIP_MAX_SOCKETS=12
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=2920
-
-# Small system task stacks
-CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2048
