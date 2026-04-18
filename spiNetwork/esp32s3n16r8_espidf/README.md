@@ -1,4 +1,5 @@
 # ESP32-WROOM-1 SPI 主机端实现
+esp-idf v5.2.6可以编译通过
 
 ## 概述
 
